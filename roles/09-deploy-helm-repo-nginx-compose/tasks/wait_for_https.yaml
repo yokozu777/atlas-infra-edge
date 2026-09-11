@@ -1,0 +1,30 @@
+---
+- name: Wait for helm-repo nginx HTTPS before chart cache warm
+  ansible.builtin.shell: |
+    set -o pipefail
+    host="{{ item }}"
+    curl -fsSk -o /dev/null --connect-timeout 10 "https://${host}/index.yaml"
+  args:
+    executable: /bin/bash
+  loop: "{{ helm_repo_cache_warm_mirror_hosts | default([]) | unique }}"
+  register: helm_repo_nginx_https_wait
+  until: helm_repo_nginx_https_wait is succeeded
+  retries: "{{ helm_repo_nginx_cache_warm_wait_retries | default(60) }}"
+  delay: "{{ helm_repo_nginx_cache_warm_wait_delay | default(5) }}"
+  changed_when: false
+  when: helm_repo_cache_warm_mirror_hosts | default([]) | length > 0
+
+- name: Wait for GitHub releases vhost HTTPS before file-store warm
+  ansible.builtin.shell: |
+    set -euo pipefail
+    host="{{ helm_repo_nginx_releases_host }}"
+    code="$(curl -sSk -o /dev/null --connect-timeout 10 -w '%{http_code}' "https://${host}/")"
+    test "$code" != "000"
+  args:
+    executable: /bin/bash
+  register: helm_repo_releases_https_wait
+  until: helm_repo_releases_https_wait is succeeded
+  retries: "{{ helm_repo_nginx_cache_warm_wait_retries | default(60) }}"
+  delay: "{{ helm_repo_nginx_cache_warm_wait_delay | default(5) }}"
+  changed_when: false
+  when: helm_repo_releases_warm_plan | default([]) | length > 0

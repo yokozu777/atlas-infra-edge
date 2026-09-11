@@ -1,0 +1,20 @@
+services:
+  nginx:
+    image: "{{ pkg_repo_nginx_image }}"
+    container_name: "{{ pkg_repo_nginx_container_name }}"
+    restart: unless-stopped
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: 1
+      net.ipv6.conf.default.disable_ipv6: 1
+      net.ipv6.conf.lo.disable_ipv6: 1
+{% if dns_server_ip is defined and (dns_server_ip | string | length) > 0 %}
+    dns:
+      - {{ dns_server_ip }}
+{% endif %}
+    ports:
+      - "{{ pkg_repo_nginx_listen_ip }}:{{ pkg_repo_nginx_https_port }}:443/tcp"
+    volumes:
+      - {{ pkg_repo_nginx_config_dir }}/nginx.conf:/etc/nginx/nginx.conf:ro
+      - {{ pkg_repo_nginx_vhosts_dir }}:/etc/nginx/conf.d/pkg-repo-vhosts:ro
+      - {{ pkg_repo_tls_dir }}:/etc/nginx/pkg-certs:ro
+      - {{ pkg_repo_nginx_cache_dir }}:/var/cache/nginx/pkg-repo

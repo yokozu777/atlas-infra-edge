@@ -1,0 +1,101 @@
+---
+# Phase 5 bootstrap: start, ACME wait, post-init compose, ca.json policy, restart.
+# Images come from compose_pull (or must already be present). Never from render.
+# Included from main.yaml / compose_start_group — never from render-only runs.
+#
+# Re-detect ACME need here: clusterctl split tags (compose_render then
+# compose_start_*) do not keep in-memory facts from the previous playbook run.
+
+- name: Check step-ca provision state for bootstrap
+  ansible.builtin.stat:
+    path: "{{ stepca_provisioned_marker }}"
+  register: stepca_provisioned_stat
+
+- name: Decide whether step-ca needs ACME init
+  ansible.builtin.set_fact:
+    stepca_needs_acme_init: "{{ not stepca_provisioned_stat.stat.exists }}"
+
+- name: Ensure step-ca stack is running via systemd
+  ansible.builtin.systemd:
+    name: "{{ compose_systemd_stepca_unit_name }}.service"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: setup_compose_systemd | default(false) | bool
+
+- name: Wait for step-ca provisioning to complete
+  ansible.builtin.wait_for:
+    path: "{{ stepca_provisioned_marker }}"
+    state: present
+    timeout: "{{ stepca_init_timeout }}"
+  when: stepca_needs_acme_init | bool
+
+- name: Deploy step-ca docker compose without ACME init after provisioning
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ stepca_compose_project_dir }}/docker-compose.yml"
+    mode: "0644"
+  vars:
+    stepca_init_acme: false
+  register: stepca_compose_final
+  when: stepca_needs_acme_init | bool
+
+- name: Re-check step-ca provision state
+  ansible.builtin.stat:
+    path: "{{ stepca_provisioned_marker }}"
+  register: stepca_provisioned_stat_final
+
+- name: Configure step-ca TLS certificate duration limits in ca.json
+  ansible.builtin.shell: |
+    python3 <<'PY'
+    import json
+    import shutil
+    import time
+    from pathlib import Path
+
+    path = Path("{{ stepca_data_dir }}/config/ca.json")
+    cfg = json.loads(path.read_text())
+    authority = cfg.setdefault("authority", {})
+    claims = authority.setdefault("claims", {})
+    desired = {
+        "maxTLSCertDuration": "{{ stepca_tls_max_cert_duration }}",
+        "defaultTLSCertDuration": "{{ stepca_tls_default_cert_duration }}",
+    }
+    changed = any(claims.get(key) != value for key, value in desired.items())
+    if changed:
+        backup = path.with_name(f"ca.json.bak-{int(time.time())}")
+        shutil.copy2(path, backup)
+        claims.update(desired)
+        path.write_text(json.dumps(cfg, indent="\t") + "\n")
+    print("changed" if changed else "ok")
+    PY
+  register: stepca_ca_json_claims
+  changed_when: stepca_ca_json_claims.stdout.strip() == "changed"
+  when: stepca_provisioned_stat_final.stat.exists
+
+- name: Determine whether step-ca stack requires restart
+  ansible.builtin.set_fact:
+    stepca_restart_required: >-
+      {{
+        stepca_compose_initial.changed | default(false)
+        or stepca_compose_final.changed | default(false)
+        or stepca_ca_json_claims.changed | default(false)
+      }}
+
+- name: Restart step-ca stack before dependent roles consume CA policy
+  ansible.builtin.systemd:
+    name: "{{ compose_systemd_stepca_unit_name }}.service"
+    state: restarted
+    daemon_reload: true
+  when:
+    - setup_compose_systemd | default(false) | bool
+    - stepca_restart_required | default(false) | bool
+
+- name: Mark step-ca stack pending restart after bootstrap changes
+  ansible.builtin.include_role:
+    name: 06-enable-compose-systemd
+    tasks_from: mark_compose_pending_restart.yaml
+  vars:
+    compose_pending_restart_units:
+      - "{{ compose_systemd_stepca_unit_name }}"
+  when: stepca_restart_required | default(false) | bool

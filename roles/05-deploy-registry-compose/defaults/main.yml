@@ -1,0 +1,5 @@
+---
+# Override these knobs via inventory / group_vars when needed.
+
+# Optional override for cron systemd unit (empty = auto: crond on RedHat, cron on Debian).
+registry_tls_cron_systemd_unit_override: ""

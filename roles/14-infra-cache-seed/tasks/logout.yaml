@@ -1,0 +1,10 @@
+---
+- name: Log out of infra cache seed registry
+  ansible.builtin.command:
+    argv:
+      - docker
+      - logout
+      - "{{ infra_cache_seed_registry_host }}"
+  register: infra_cache_seed_logout
+  changed_when: false
+  failed_when: false

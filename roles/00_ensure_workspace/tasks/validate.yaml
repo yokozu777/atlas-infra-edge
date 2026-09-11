@@ -1,0 +1,64 @@
+---
+# Resolve order: CLUSTER_WORKSPACE_* env → group_vars → cluster_domain → optional k8s_cluster_domain.
+- name: Resolve cluster workspace id
+  ansible.builtin.set_fact:
+    cluster_workspace_id: >-
+      {{
+        lookup('ansible.builtin.env', 'CLUSTER_WORKSPACE_ID', default='')
+        | default(cluster_workspace_id | default('', true), true)
+        | default(cluster_domain | default('', true), true)
+        | default(k8s_cluster_domain | default('', true), true)
+      }}
+
+- name: Resolve cluster workspace parent
+  ansible.builtin.set_fact:
+    cluster_workspace_parent: >-
+      {{
+        lookup('ansible.builtin.env', 'CLUSTER_WORKSPACE_PARENT', default='')
+        | default(cluster_workspace_parent | default('./workspace', true), true)
+      }}
+
+- name: Resolve cluster workspace root
+  ansible.builtin.set_fact:
+    cluster_workspace_root: >-
+      {{
+        lookup('ansible.builtin.env', 'CLUSTER_WORKSPACE_ROOT', default='')
+        | default(cluster_workspace_root | default('', true), true)
+        | default(cluster_workspace_parent ~ '/' ~ cluster_workspace_id, true)
+      }}
+
+- name: Assert cluster workspace id is set
+  ansible.builtin.assert:
+    that:
+      - cluster_workspace_id | length > 0
+      - cluster_workspace_id is match('^[a-zA-Z0-9.-]+$')
+    fail_msg: >-
+      cluster_workspace_id must be set via CLUSTER_WORKSPACE_ID, group_vars/all/atlas-infra-edge.yml, or cluster_domain
+      (allowed charset: a-zA-Z0-9.-). Optional fallback: k8s_cluster_domain.
+
+- name: Assert cluster workspace id matches k8s_cluster_domain when both are set
+  ansible.builtin.assert:
+    that:
+      - cluster_workspace_id == k8s_cluster_domain
+    fail_msg: >-
+      cluster_workspace_id ({{ cluster_workspace_id }}) must equal k8s_cluster_domain
+      ({{ k8s_cluster_domain }}) when k8s_cluster_domain is set — keep them aligned or unset k8s_cluster_domain for standalone
+  when: k8s_cluster_domain | default('') | length > 0
+
+- name: Assert cluster workspace root is defined
+  ansible.builtin.assert:
+    that:
+      - cluster_workspace_root | default('') | length > 0
+    fail_msg: >-
+      cluster_workspace_root must be defined in group_vars/all/atlas-infra-edge.yml
+      (or CLUSTER_WORKSPACE_ROOT / CLUSTER_WORKSPACE_PARENT)
+
+- name: Log active cluster workspace
+  ansible.builtin.debug:
+    msg: "cluster workspace: {{ cluster_workspace_root }} (id={{ cluster_workspace_id }})"
+
+- name: Log workspace ansible runtime paths
+  ansible.builtin.debug:
+    msg:
+      - "ansible fact cache: {{ cluster_workspace_root }}/.ansible_facts_cache"
+      - "ansible local tmp: {{ cluster_workspace_root }}/.ansible/tmp"

@@ -1,0 +1,3 @@
+{% for item in infra_cache_seed_components | default([]) %}
+{{ item.name }}
+{% endfor %}

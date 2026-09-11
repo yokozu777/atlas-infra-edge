@@ -1,0 +1,52 @@
+---
+# Two-layer OCI seed of infra pull-through caches (host bind-mounts, not nginx layers).
+# Load XOR nginx_cache_sync_enabled (01_validate_vars). Publish may coexist with 11 push.
+
+infra_cache_seed_publish_enabled: false
+infra_cache_seed_publish_image: ""
+infra_cache_seed_publish_tag: ""
+infra_cache_seed_publish_include:
+  registry: true
+  helm_repo: true
+  pkg_repo: true
+  custom_www: true
+
+infra_cache_seed_load_enabled: false
+infra_cache_seed_load_image: ""
+infra_cache_seed_load_tag: ""
+infra_cache_seed_load_include:
+  registry: true
+  helm_repo: true
+  pkg_repo: true
+  custom_www: true
+
+infra_cache_seed_builder_image: busybox:1.36
+infra_cache_seed_publish_timeout_sec: 14400
+infra_cache_seed_load_timeout_sec: 7200
+infra_cache_seed_min_free_gb: 5
+infra_cache_seed_stop_services: true
+infra_cache_seed_load_skip_if_same_digest: true
+infra_cache_seed_load_stamp_path: "{{ infra_bootstrap_repo_state_dir | default('/var/lib/atlas-infra') }}/cache-seed.stamp"
+infra_cache_seed_nginx_uid: 101
+infra_cache_seed_nginx_gid: 101
+# GitHub Releases file store packed with helm_repo include.
+helm_repo_nginx_releases_dir: /opt/helm-repo-nginx/releases
+
+# Docker certs.d CA for seed registry login/pull/push (not system trust, no dockerd restart).
+# enabled + load/publish: XOR src vs dir (01_validate_vars).
+infra_cache_seed_registry_tls_ca_enabled: false
+infra_cache_seed_registry_tls_ca_src: ""
+infra_cache_seed_registry_tls_ca_dir: ""
+infra_cache_seed_registry_tls_ca_validate_certs: false
+
+# Role-internal (not product catalog).
+infra_cache_seed_work_dir: "{{ infra_bootstrap_repo_state_dir | default('/var/lib/atlas-infra') }}/cache-seed-work"
+infra_cache_seed_services_hold_path: "{{ infra_bootstrap_repo_state_dir | default('/var/lib/atlas-infra') }}/cache-seed-services.held"
+infra_cache_seed_publish_use_staging: false
+infra_cache_seed_async_poll_sec: 10
+
+# Filled from atlas-infra-edge.secrets.yml when a layer is enabled.
+infra_cache_seed_publish_registry_user: ""
+infra_cache_seed_publish_registry_password: ""
+infra_cache_seed_load_registry_user: ""
+infra_cache_seed_load_registry_password: ""

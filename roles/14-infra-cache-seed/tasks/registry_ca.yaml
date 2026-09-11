@@ -1,0 +1,134 @@
+---
+# Install a PEM bundle into Docker certs.d for the seed registry host.
+# No dockerd restart; not the OS trust store; not insecure-registries.
+
+- name: Set infra cache seed registry TLS CA dest
+  ansible.builtin.set_fact:
+    infra_cache_seed_registry_tls_ca_dest: >-
+      /etc/docker/certs.d/{{ infra_cache_seed_registry_host }}/ca.crt
+    infra_cache_seed_registry_tls_ca_src_trim: "{{ infra_cache_seed_registry_tls_ca_src | default('') | trim }}"
+    infra_cache_seed_registry_tls_ca_dir_trim: "{{ infra_cache_seed_registry_tls_ca_dir | default('') | trim }}"
+
+- name: Assert infra cache seed registry TLS CA source XOR
+  ansible.builtin.assert:
+    that:
+      - >-
+        (
+          (infra_cache_seed_registry_tls_ca_src_trim | length > 0)
+          and (infra_cache_seed_registry_tls_ca_dir_trim | length == 0)
+        )
+        or (
+          (infra_cache_seed_registry_tls_ca_src_trim | length == 0)
+          and (infra_cache_seed_registry_tls_ca_dir_trim | length > 0)
+        )
+    fail_msg: >-
+      infra_cache_seed_registry_tls_ca_enabled=true requires exactly one of
+      infra_cache_seed_registry_tls_ca_src or infra_cache_seed_registry_tls_ca_dir.
+
+- name: Ensure infra cache seed registry Docker certs.d directory
+  ansible.builtin.file:
+    path: "{{ infra_cache_seed_registry_tls_ca_dest | dirname }}"
+    state: directory
+    mode: "0755"
+
+- name: Fetch infra cache seed registry TLS CA from URL
+  ansible.builtin.get_url:
+    url: "{{ infra_cache_seed_registry_tls_ca_src_trim }}"
+    dest: "{{ infra_cache_seed_registry_tls_ca_dest }}"
+    mode: "0644"
+    owner: root
+    group: root
+    force: true
+    validate_certs: "{{ infra_cache_seed_registry_tls_ca_validate_certs | default(false) | bool }}"
+  when:
+    - infra_cache_seed_registry_tls_ca_src_trim | length > 0
+    - infra_cache_seed_registry_tls_ca_src_trim is match('^https?://')
+
+- name: Copy infra cache seed registry TLS CA from host path
+  ansible.builtin.copy:
+    src: "{{ infra_cache_seed_registry_tls_ca_src_trim }}"
+    dest: "{{ infra_cache_seed_registry_tls_ca_dest }}"
+    remote_src: true
+    mode: "0644"
+    owner: root
+    group: root
+  when:
+    - infra_cache_seed_registry_tls_ca_src_trim | length > 0
+    - not (infra_cache_seed_registry_tls_ca_src_trim is match('^https?://'))
+
+- name: Stat infra cache seed registry TLS CA dir on controller
+  ansible.builtin.stat:
+    path: "{{ playbook_dir }}/{{ infra_cache_seed_registry_tls_ca_dir_trim }}"
+  register: infra_cache_seed_registry_tls_ca_dir_stat
+  delegate_to: localhost
+  become: false
+  when: infra_cache_seed_registry_tls_ca_dir_trim | length > 0
+
+- name: Assert infra cache seed registry TLS CA dir exists on controller
+  ansible.builtin.assert:
+    that:
+      - infra_cache_seed_registry_tls_ca_dir_stat.stat.exists | default(false)
+      - infra_cache_seed_registry_tls_ca_dir_stat.stat.isdir | default(false)
+    fail_msg: >-
+      infra_cache_seed_registry_tls_ca_dir must be a directory relative to
+      playbook_dir (found: {{ playbook_dir }}/{{ infra_cache_seed_registry_tls_ca_dir_trim }}).
+  when: infra_cache_seed_registry_tls_ca_dir_trim | length > 0
+
+- name: Find infra cache seed registry TLS CA files on controller
+  ansible.builtin.find:
+    paths: "{{ playbook_dir }}/{{ infra_cache_seed_registry_tls_ca_dir_trim }}"
+    patterns:
+      - "*.crt"
+      - "*.pem"
+    file_type: file
+  register: infra_cache_seed_registry_tls_ca_files
+  delegate_to: localhost
+  become: false
+  when: infra_cache_seed_registry_tls_ca_dir_trim | length > 0
+
+- name: Assert infra cache seed registry TLS CA dir has PEM files
+  ansible.builtin.assert:
+    that:
+      - (infra_cache_seed_registry_tls_ca_files.files | default([]) | length) > 0
+    fail_msg: >-
+      infra_cache_seed_registry_tls_ca_dir has no .crt/.pem files
+      ({{ playbook_dir }}/{{ infra_cache_seed_registry_tls_ca_dir_trim }}).
+  when: infra_cache_seed_registry_tls_ca_dir_trim | length > 0
+
+- name: Slurp infra cache seed registry TLS CA files on controller
+  ansible.builtin.slurp:
+    src: "{{ item.path }}"
+  loop: "{{ (infra_cache_seed_registry_tls_ca_files.files | default([])) | sort(attribute='path') }}"
+  register: infra_cache_seed_registry_tls_ca_slurp
+  delegate_to: localhost
+  become: false
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when: infra_cache_seed_registry_tls_ca_dir_trim | length > 0
+
+- name: Write infra cache seed registry TLS CA bundle from dir
+  ansible.builtin.copy:
+    dest: "{{ infra_cache_seed_registry_tls_ca_dest }}"
+    mode: "0644"
+    owner: root
+    group: root
+    content: >-
+      {{
+        infra_cache_seed_registry_tls_ca_slurp.results
+        | map(attribute='content')
+        | map('b64decode')
+        | map('trim')
+        | join('\n')
+      }}{{ '\n' }}
+  when: infra_cache_seed_registry_tls_ca_dir_trim | length > 0
+
+- name: Assert infra cache seed registry TLS CA dest is a readable PEM
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - x509
+      - -in
+      - "{{ infra_cache_seed_registry_tls_ca_dest }}"
+      - -noout
+      - -subject
+  changed_when: false

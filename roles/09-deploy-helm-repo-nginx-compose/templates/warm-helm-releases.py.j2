@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""Fill GitHub Releases file store via github.com (follow SAS). Do not fetch via releases.helm."""
+from __future__ import annotations
+
+import json
+import os
+import ssl
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+PLAN_PATH = Path({{ helm_repo_nginx_compose_project_dir | to_json }}) / "helm-releases-warm-plan.json"
+RELEASES_DIR = Path({{ helm_repo_nginx_releases_dir | to_json }})
+RELEASES_HOST = {{ helm_repo_nginx_releases_host | to_json }}
+STORE_UID = {{ helm_repo_nginx_releases_uid | default(101) | int }}
+STORE_GID = {{ helm_repo_nginx_releases_gid | default(101) | int }}
+CONNECT_TIMEOUT = {{ helm_repo_nginx_cache_warm_connect_timeout | default(30) }}
+READ_TIMEOUT = {{ helm_repo_nginx_cache_warm_read_timeout | default(900) }}
+TIMEOUT = max(CONNECT_TIMEOUT, READ_TIMEOUT)
+USER_AGENT = "helm-releases-warm/1"
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _ssl_context() -> ssl.SSLContext:
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def fetch_follow(url: str) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, context=_ssl_context(), timeout=TIMEOUT) as resp:
+        return resp.read()
+
+
+def fetch_no_follow(url: str) -> tuple[int, dict[str, str], bytes]:
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=_ssl_context()),
+        _NoRedirect(),
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with opener.open(req, timeout=TIMEOUT) as resp:
+            headers = {k.lower(): v for k, v in resp.headers.items()}
+            return int(resp.status), headers, resp.read()
+    except urllib.error.HTTPError as exc:
+        headers = {k.lower(): v for k, v in exc.headers.items()} if exc.headers else {}
+        body = exc.read() if exc.fp is not None else b""
+        return int(exc.code), headers, body
+
+
+def store_path_for(github_path: str) -> Path:
+    rel = github_path.strip().lstrip("/")
+    dest = (RELEASES_DIR / rel).resolve()
+    store = RELEASES_DIR.resolve()
+    if dest == store or store not in dest.parents:
+        raise SystemExit(f"path escapes releases store: {github_path!r}")
+    return dest
+
+
+def chown_store_path(path: Path) -> None:
+    """chmod/chown path and every parent up to RELEASES_DIR (explicit modes, ignore umask)."""
+    store = RELEASES_DIR.resolve()
+    current = path.resolve()
+    while True:
+        if current.is_dir():
+            os.chmod(current, 0o755)
+        else:
+            os.chmod(current, 0o644)
+        os.chown(current, STORE_UID, STORE_GID)
+        if current == store:
+            break
+        current = current.parent
+
+
+def write_store(github_path: str, body: bytes) -> Path:
+    if not body:
+        raise SystemExit(f"empty body for {github_path!r}")
+    if body.lstrip()[:1] == b"<":
+        raise SystemExit(f"github returned HTML for {github_path!r}")
+    dest = store_path_for(github_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(body)
+    chown_store_path(dest)
+    return dest
+
+
+def verify_try_files(github_path: str) -> None:
+    url = f"https://{RELEASES_HOST}/{github_path.lstrip('/')}"
+    status, headers, _body = fetch_no_follow(url)
+    location = headers.get("location", "")
+    cache_status = headers.get("x-cache-status", "")
+    if status != 200:
+        raise SystemExit(f"try_files miss {url}: HTTP {status} location={location!r}")
+    if location:
+        raise SystemExit(f"try_files miss {url}: redirect to {location}")
+    if cache_status and cache_status != "STORE":
+        raise SystemExit(f"try_files miss {url}: X-Cache-Status={cache_status!r}")
+
+
+def main() -> int:
+    plan = json.loads(PLAN_PATH.read_text(encoding="utf-8"))
+    if not plan:
+        print("empty releases warm plan")
+        return 0
+
+    RELEASES_DIR.mkdir(parents=True, exist_ok=True)
+    warmed = 0
+    for item in plan:
+        github_path = str(item.get("path") or "").strip().lstrip("/")
+        if not github_path:
+            raise SystemExit("releases warm spec missing path")
+        source = f"https://github.com/{github_path}"
+        print(f"STORE {github_path}", flush=True)
+        body = fetch_follow(source)
+        write_store(github_path, body)
+        print(f"CHECK https://{RELEASES_HOST}/{github_path}", flush=True)
+        verify_try_files(github_path)
+        warmed += 1
+
+    print(f"helm-releases store warm complete ({warmed} files)", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

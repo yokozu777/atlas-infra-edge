@@ -1,0 +1,4 @@
+---
+# Phase 1 post_start: requires BIND unit started (cold path / reconcile).
+- name: Point infra host resolver at local BIND
+  ansible.builtin.import_tasks: configure_infra_resolver.yaml

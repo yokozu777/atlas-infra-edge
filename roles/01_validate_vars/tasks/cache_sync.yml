@@ -1,0 +1,84 @@
+---
+- name: Assert cache sync remote host is set
+  ansible.builtin.assert:
+    that:
+      - nginx_cache_sync_remote_host | default('') | length > 0
+    fail_msg: nginx_cache_sync_remote_host is required when nginx_cache_sync_enabled=true
+
+- name: Assert cache sync direction is valid
+  ansible.builtin.assert:
+    that:
+      - nginx_cache_sync_direction | default('pull') in ['pull', 'push']
+    fail_msg: nginx_cache_sync_direction must be pull or push
+
+- name: Assert cache sync SSH auth mode is valid
+  ansible.builtin.assert:
+    that:
+      - nginx_cache_sync_ssh_auth | default('key') in ['key', 'password']
+    fail_msg: nginx_cache_sync_ssh_auth must be key or password
+
+- name: Assert cache sync password when ssh_auth is password
+  ansible.builtin.assert:
+    that:
+      - nginx_cache_sync_ssh_password | default('') | trim | length > 0
+      - nginx_cache_sync_ssh_password | trim | upper != 'CHANGEME'
+    fail_msg: >-
+      nginx_cache_sync_ssh_auth=password requires a real nginx_cache_sync_ssh_password
+      (replace CHANGEME via EXTRA_VARS_FILE / vault)
+  when: nginx_cache_sync_ssh_auth | default('key') == 'password'
+
+- name: Assert cache sync ownership resolve mode is valid
+  ansible.builtin.assert:
+    that:
+      - nginx_cache_sync_ownership_resolve | default('static') in ['static', 'container', 'image']
+    fail_msg: nginx_cache_sync_ownership_resolve must be static, container, or image
+
+- name: Assert cache sync static nginx ownership ids look numeric
+  ansible.builtin.assert:
+    that:
+      # default(..., true): treat undefined/empty as product default (role 11 not on localhost)
+      - nginx_cache_sync_nginx_uid | default(101, true) | string | regex_search('^[0-9]+$') is not none
+      - nginx_cache_sync_nginx_gid | default(101, true) | string | regex_search('^[0-9]+$') is not none
+    fail_msg: >-
+      nginx_cache_sync_nginx_uid/gid must be numeric
+      (got uid={{ nginx_cache_sync_nginx_uid | default(101, true) | quote }},
+      gid={{ nginx_cache_sync_nginx_gid | default(101, true) | quote }})
+  when: (nginx_cache_sync_ownership_resolve | default('static')) == 'static'
+
+- name: Assert cache sync skip-if-fresh max age is positive
+  ansible.builtin.assert:
+    that:
+      - nginx_cache_sync_fresh_max_age_hours | default(24) | float > 0
+    fail_msg: nginx_cache_sync_fresh_max_age_hours must be > 0
+
+- name: Assert cache sync stamp path is set when skip-if-fresh is enabled
+  ansible.builtin.assert:
+    that:
+      - >-
+          (
+            nginx_cache_sync_stamp_path
+            | default(
+              (infra_bootstrap_repo_state_dir | default('/var/lib/atlas-infra'))
+              ~ '/cache-sync.stamp'
+            )
+          ) | trim | length > 0
+    fail_msg: nginx_cache_sync_stamp_path is required when nginx_cache_sync_skip_if_fresh=true
+  when: nginx_cache_sync_skip_if_fresh | default(false) | bool
+
+- name: Assert cache sync parallel jobs count is in range
+  ansible.builtin.assert:
+    that:
+      - nginx_cache_sync_parallel_jobs | default(4) | int >= 1
+      - nginx_cache_sync_parallel_jobs | default(4) | int <= 8
+    fail_msg: nginx_cache_sync_parallel_jobs must be an integer from 1 to 8
+
+- name: Assert cache sync parallel timeout and poll are positive
+  ansible.builtin.assert:
+    that:
+      - nginx_cache_sync_parallel_timeout_sec | default(7200) | int >= 60
+      - nginx_cache_sync_parallel_poll_sec | default(5) | int >= 1
+      - (nginx_cache_sync_parallel_poll_sec | default(5) | int) < (nginx_cache_sync_parallel_timeout_sec | default(7200) | int)
+    fail_msg: >-
+      nginx_cache_sync_parallel_timeout_sec must be >= 60 and
+      nginx_cache_sync_parallel_poll_sec must be >= 1 and less than timeout
+  when: nginx_cache_sync_parallel | default(false) | bool

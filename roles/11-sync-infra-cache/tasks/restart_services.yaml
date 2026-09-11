@@ -1,0 +1,77 @@
+---
+# Restart services recorded in nginx_cache_sync_stopped_* (from this stop or a hold).
+# Cold path: all false → no-op (must not start registry before compose_start_registry).
+
+- name: Start registry compose after infra cache sync
+  ansible.builtin.systemd:
+    name: "{{ compose_systemd_registry_unit_name }}.service"
+    state: started
+  when:
+    - nginx_cache_sync_stopped_registry | default(false) | bool
+    - setup_compose_systemd | default(false) | bool
+  failed_when: false
+
+- name: Start registry compose via docker after infra cache sync
+  ansible.builtin.command:
+    cmd: docker compose up -d --remove-orphans
+    chdir: "{{ registry_compose_project_dir }}"
+  when:
+    - nginx_cache_sync_stopped_registry | default(false) | bool
+    - not (setup_compose_systemd | default(false) | bool)
+  failed_when: false
+
+- name: Start registry nginx compose after infra cache sync
+  ansible.builtin.systemd:
+    name: "{{ compose_systemd_registry_nginx_unit_name }}.service"
+    state: started
+  when:
+    - nginx_cache_sync_stopped_registry_nginx | default(false) | bool
+    - setup_compose_systemd | default(false) | bool
+  failed_when: false
+
+- name: Start registry nginx container after infra cache sync
+  ansible.builtin.command:
+    cmd: docker compose up -d --remove-orphans
+    chdir: "{{ registry_nginx_compose_project_dir }}"
+  when:
+    - nginx_cache_sync_stopped_registry_nginx | default(false) | bool
+    - not (setup_compose_systemd | default(false) | bool)
+  failed_when: false
+
+- name: Start pkg-repo nginx compose after infra cache sync
+  ansible.builtin.systemd:
+    name: "{{ compose_systemd_pkg_repo_nginx_unit_name }}.service"
+    state: started
+  when:
+    - nginx_cache_sync_stopped_pkg_repo_nginx | default(false) | bool
+    - setup_compose_systemd | default(false) | bool
+  failed_when: false
+
+- name: Start helm-repo nginx compose after infra cache sync
+  ansible.builtin.systemd:
+    name: "{{ compose_systemd_helm_repo_nginx_unit_name }}.service"
+    state: started
+  when:
+    - nginx_cache_sync_stopped_helm_repo_nginx | default(false) | bool
+    - setup_compose_systemd | default(false) | bool
+  failed_when: false
+
+- name: Start custom nginx compose after infra cache sync
+  ansible.builtin.systemd:
+    name: "{{ compose_systemd_custom_nginx_unit_name }}.service"
+    state: started
+  when:
+    - nginx_cache_sync_stopped_custom_nginx | default(false) | bool
+    - setup_compose_systemd | default(false) | bool
+  failed_when: false
+
+- name: Clear infra cache sync services hold after restart attempt
+  ansible.builtin.file:
+    path: "{{ nginx_cache_sync_services_hold_path }}"
+    state: absent
+  when: >-
+    (nginx_cache_sync_stopped_registry | default(false) | bool)
+    or (nginx_cache_sync_stopped_registry_nginx | default(false) | bool)
+    or (nginx_cache_sync_stopped_pkg_repo_nginx | default(false) | bool)
+    or (nginx_cache_sync_stopped_helm_repo_nginx | default(false) | bool)
+    or (nginx_cache_sync_stopped_custom_nginx | default(false) | bool)

@@ -1,0 +1,367 @@
+# Raw origin index cache (loopback). Public /index.yaml applies sub_filter
+# on this body; nginx proxy_cache stores pre-filter bytes so the two must
+# not share a location.
+server {
+    listen 127.0.0.1:{{ helm_repo_nginx_index_origin_port }};
+    allow 127.0.0.1;
+    deny all;
+
+    location / {
+        return 404;
+    }
+
+{% for proxy in helm_repo_proxy_upstreams %}
+    location = /raw/{{ proxy.proxy_hostname }}/index.yaml {
+        proxy_pass {{ proxy.proxy_origin }}{{ proxy.proxy_path_prefix }}/index.yaml;
+        proxy_set_header Host {{ proxy.upstream_host }};
+        proxy_set_header Accept-Encoding "";
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_ssl_server_name on;
+        proxy_ssl_name {{ proxy.upstream_host }};
+
+        proxy_buffer_size 512k;
+        proxy_buffers 8 512k;
+        proxy_busy_buffers_size 1024k;
+
+        proxy_cache helm_repo_cache;
+        proxy_cache_key "helm-index:{{ proxy.proxy_hostname }}";
+        proxy_cache_valid 200 {{ helm_repo_nginx_cache_valid_index }};
+        proxy_cache_valid 404 {{ helm_repo_nginx_cache_valid_not_found }};
+        proxy_ignore_headers Cache-Control Expires Set-Cookie;
+        proxy_cache_use_stale error timeout updating http_403 http_429 http_500 http_502 http_503 http_504;
+        proxy_cache_background_update on;
+        proxy_cache_lock on;
+        add_header X-Cache-Status $upstream_cache_status;
+
+        proxy_buffering on;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+    }
+{% endfor %}
+}
+
+{% for proxy in helm_repo_proxy_upstreams %}
+server {
+    listen 443 ssl;
+    server_name {{ proxy.proxy_hostname }};
+
+    ssl_certificate /etc/nginx/helm-certs/{{ helm_repo_tls_cert_filename }};
+    ssl_certificate_key /etc/nginx/helm-certs/{{ helm_repo_tls_key_filename }};
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+{% for chart_host in proxy.chart_hosts %}
+{% if chart_host == 'github.com' %}
+    # HIT: GitHub Releases file store. MISS: named location (online proxy, no SAS cache).
+    location ^~ /@chart/github.com/ {
+        root /var/cache/nginx/helm-releases;
+        rewrite ^/@chart/github\.com/(.*)$ /$1 break;
+        types { }
+        default_type application/octet-stream;
+        add_header X-Cache-Status STORE always;
+        try_files $uri @chart_github_releases;
+    }
+{% elif chart_host == 'release-assets.githubusercontent.com' %}
+    # Signed GitHub asset URLs expire; never store them in proxy_cache.
+    location ^~ /@chart/release-assets.githubusercontent.com/ {
+        rewrite ^/@chart/release-assets\.githubusercontent\.com/(.*)$ /$1 break;
+        proxy_pass https://release-assets.githubusercontent.com;
+        proxy_set_header Host release-assets.githubusercontent.com;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_ssl_server_name on;
+        proxy_ssl_name release-assets.githubusercontent.com;
+
+        proxy_buffer_size 512k;
+        proxy_buffers 8 512k;
+        proxy_busy_buffers_size 1024k;
+
+        proxy_cache off;
+        add_header X-Cache-Status $upstream_cache_status;
+
+        proxy_buffering on;
+        proxy_read_timeout 900s;
+        proxy_send_timeout 900s;
+    }
+{% else %}
+    location ^~ /@chart/{{ chart_host }}/ {
+        rewrite ^/@chart/{{ chart_host | replace('.', '\\.') }}/(.*)$ /$1 break;
+        proxy_pass https://{{ chart_host }};
+        proxy_set_header Host {{ chart_host }};
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_ssl_server_name on;
+        proxy_ssl_name {{ chart_host }};
+        proxy_redirect https://{{ chart_host }}/ https://$host/@chart/{{ chart_host }}/;
+        proxy_redirect http://{{ chart_host }}/ https://$host/@chart/{{ chart_host }}/;
+
+        proxy_buffer_size 512k;
+        proxy_buffers 8 512k;
+        proxy_busy_buffers_size 1024k;
+
+        proxy_cache helm_repo_cache;
+        proxy_cache_key "$host$uri$is_args$args";
+        proxy_cache_valid 200 206 {{ helm_repo_nginx_cache_valid_charts }};
+        proxy_cache_valid 404 {{ helm_repo_nginx_cache_valid_not_found }};
+        # Cloudflare (jetstack etc.) sets Set-Cookie / short Cache-Control; without
+        # ignore_headers nginx never stores the .tgz (always MISS).
+        proxy_ignore_headers Cache-Control Expires Set-Cookie;
+        proxy_hide_header Set-Cookie;
+        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+        proxy_cache_background_update on;
+        proxy_cache_lock on;
+        add_header X-Cache-Status $upstream_cache_status;
+
+        proxy_buffering on;
+        proxy_read_timeout 900s;
+        proxy_send_timeout 900s;
+    }
+{% endif %}
+{% endfor %}
+{% if 'github.com' in proxy.chart_hosts %}
+
+    location @chart_github_releases {
+        rewrite ^/@chart/github\.com/(.*)$ /$1 break;
+        proxy_pass https://github.com;
+        proxy_set_header Host github.com;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_ssl_server_name on;
+        proxy_ssl_name github.com;
+        proxy_redirect https://github.com/ https://$host/@chart/github.com/;
+        proxy_redirect http://github.com/ https://$host/@chart/github.com/;
+        # Keep clients on the mirror (air-gap / krang must not follow external redirects).
+        proxy_redirect https://release-assets.githubusercontent.com/ https://$host/@chart/release-assets.githubusercontent.com/;
+        proxy_redirect http://release-assets.githubusercontent.com/ https://$host/@chart/release-assets.githubusercontent.com/;
+
+        proxy_buffer_size 512k;
+        proxy_buffers 8 512k;
+        proxy_busy_buffers_size 1024k;
+
+        proxy_cache off;
+        add_header X-Cache-Status $upstream_cache_status;
+
+        proxy_buffering on;
+        proxy_read_timeout 900s;
+        proxy_send_timeout 900s;
+    }
+{% endif %}
+
+    location = /index.yaml {
+        # Cached raw index from loopback, then rewrite chart URLs.
+        # Do not proxy_cache here: cache stores the pre-sub_filter body.
+        proxy_pass http://127.0.0.1:{{ helm_repo_nginx_index_origin_port }}/raw/{{ proxy.proxy_hostname }}/index.yaml;
+        proxy_set_header Host 127.0.0.1;
+        proxy_set_header Accept-Encoding "";
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_no_cache 1;
+        proxy_cache_bypass 1;
+
+        proxy_buffer_size 512k;
+        proxy_buffers 8 512k;
+        proxy_busy_buffers_size 1024k;
+
+        proxy_buffering on;
+        # Inner origin fetch is 30s; keep a small margin so loopback MISS is not cut.
+        proxy_read_timeout 35s;
+        proxy_send_timeout 35s;
+
+        gzip off;
+        sub_filter_once off;
+        sub_filter_types application/octet-stream text/plain text/yaml application/x-yaml application/yaml;
+        sub_filter '{{ proxy.proxy_public_base }}' 'https://{{ proxy.proxy_hostname }}/';
+        sub_filter 'http://{{ proxy.upstream_host }}{{ proxy.proxy_path_prefix }}/' 'https://{{ proxy.proxy_hostname }}/';
+{% for chart_host in proxy.chart_hosts %}
+        sub_filter 'https://{{ chart_host }}/' 'https://{{ proxy.proxy_hostname }}/@chart/{{ chart_host }}/';
+        sub_filter 'http://{{ chart_host }}/' 'https://{{ proxy.proxy_hostname }}/@chart/{{ chart_host }}/';
+{% endfor %}
+    }
+
+    location / {
+        proxy_pass {{ proxy.proxy_origin }}{{ proxy.proxy_path_prefix }}/;
+        proxy_set_header Host {{ proxy.upstream_host }};
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_ssl_server_name on;
+        proxy_ssl_name {{ proxy.upstream_host }};
+
+        proxy_cache helm_repo_cache;
+        proxy_cache_key "$host$uri$is_args$args";
+        proxy_cache_valid 200 206 302 {{ helm_repo_nginx_cache_valid_charts }};
+        proxy_cache_valid 404 {{ helm_repo_nginx_cache_valid_not_found }};
+        # Same Cloudflare cookie / Cache-Control issue as /@chart/ (relative charts/*.tgz).
+        proxy_ignore_headers Cache-Control Expires Set-Cookie;
+        proxy_hide_header Set-Cookie;
+        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+        proxy_cache_background_update on;
+        proxy_cache_lock on;
+        add_header X-Cache-Status $upstream_cache_status;
+
+        proxy_buffering on;
+        proxy_read_timeout 900s;
+        proxy_send_timeout 900s;
+    }
+}
+{% endfor %}
+
+server {
+    listen 443 ssl;
+    server_name {{ helm_repo_nginx_raw_host }};
+
+    ssl_certificate /etc/nginx/helm-certs/{{ helm_repo_tls_cert_filename }};
+    ssl_certificate_key /etc/nginx/helm-certs/{{ helm_repo_tls_key_filename }};
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    location / {
+        return 403;
+    }
+
+{% for prefix in helm_repo_nginx_raw_github_allowlist %}
+    location ^~ /{{ prefix }}/ {
+        proxy_pass https://raw.githubusercontent.com;
+        proxy_set_header Host raw.githubusercontent.com;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_ssl_server_name on;
+        proxy_ssl_name raw.githubusercontent.com;
+
+        proxy_buffer_size 512k;
+        proxy_buffers 8 512k;
+        proxy_busy_buffers_size 1024k;
+
+        proxy_cache helm_repo_cache;
+        proxy_cache_key "$host$uri$is_args$args";
+        proxy_cache_valid 200 206 {{ helm_repo_nginx_cache_valid_raw }};
+        proxy_cache_valid 404 {{ helm_repo_nginx_cache_valid_not_found }};
+        proxy_cache_use_stale error timeout updating http_403 http_429 http_500 http_502 http_503 http_504;
+        proxy_cache_background_update on;
+        proxy_cache_lock on;
+        add_header X-Cache-Status $upstream_cache_status;
+
+        proxy_buffering on;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+    }
+{% endfor %}
+
+    location ~ ^/api/dashboards/({{ helm_repo_nginx_gnet_allowlist | map('string') | join('|') }})/revisions/[0-9]+/download$ {
+        proxy_pass https://grafana.com;
+        proxy_set_header Host grafana.com;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_ssl_server_name on;
+        proxy_ssl_name grafana.com;
+
+        proxy_buffer_size 512k;
+        proxy_buffers 8 512k;
+        proxy_busy_buffers_size 1024k;
+
+        proxy_cache helm_repo_cache;
+        proxy_cache_key "$host$uri$is_args$args";
+        proxy_cache_valid 200 206 {{ helm_repo_nginx_cache_valid_gnet }};
+        proxy_cache_valid 404 {{ helm_repo_nginx_cache_valid_not_found }};
+        proxy_cache_use_stale error timeout updating http_403 http_429 http_500 http_502 http_503 http_504;
+        proxy_cache_background_update on;
+        proxy_cache_lock on;
+        add_header X-Cache-Status $upstream_cache_status;
+
+        proxy_buffering on;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name {{ helm_repo_nginx_releases_host }};
+
+    ssl_certificate /etc/nginx/helm-certs/{{ helm_repo_tls_cert_filename }};
+    ssl_certificate_key /etc/nginx/helm-certs/{{ helm_repo_tls_key_filename }};
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    location / {
+        return 403;
+    }
+
+{% for prefix in helm_repo_nginx_releases_github_allowlist %}
+    # HIT: file store (path after github.com/). MISS: named location (online proxy).
+    location ^~ /{{ prefix }}/ {
+        root /var/cache/nginx/helm-releases;
+        types { }
+        default_type application/octet-stream;
+        add_header X-Cache-Status STORE always;
+        try_files $uri @github_releases;
+    }
+{% endfor %}
+
+    location @github_releases {
+        proxy_pass https://github.com;
+        proxy_set_header Host github.com;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_ssl_server_name on;
+        proxy_ssl_name github.com;
+        proxy_redirect https://github.com/ https://$host/;
+        proxy_redirect http://github.com/ https://$host/;
+        proxy_redirect https://release-assets.githubusercontent.com/ https://$host/@chart/release-assets.githubusercontent.com/;
+        proxy_redirect http://release-assets.githubusercontent.com/ https://$host/@chart/release-assets.githubusercontent.com/;
+
+        proxy_buffer_size 512k;
+        proxy_buffers 8 512k;
+        proxy_busy_buffers_size 1024k;
+
+        proxy_cache off;
+        add_header X-Cache-Status $upstream_cache_status;
+
+        proxy_buffering on;
+        proxy_read_timeout 900s;
+        proxy_send_timeout 900s;
+    }
+
+    location ^~ /@chart/release-assets.githubusercontent.com/ {
+        rewrite ^/@chart/release-assets\.githubusercontent\.com/(.*)$ /$1 break;
+        proxy_pass https://release-assets.githubusercontent.com;
+        proxy_set_header Host release-assets.githubusercontent.com;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_ssl_server_name on;
+        proxy_ssl_name release-assets.githubusercontent.com;
+
+        proxy_buffer_size 512k;
+        proxy_buffers 8 512k;
+        proxy_busy_buffers_size 1024k;
+
+        proxy_cache off;
+        add_header X-Cache-Status $upstream_cache_status;
+
+        proxy_buffering on;
+        proxy_read_timeout 900s;
+        proxy_send_timeout 900s;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name {{ helm_repo_nginx_host }};
+
+    ssl_certificate /etc/nginx/helm-certs/{{ helm_repo_tls_cert_filename }};
+    ssl_certificate_key /etc/nginx/helm-certs/{{ helm_repo_tls_key_filename }};
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    location / {
+        return 404;
+    }
+}

@@ -1,0 +1,681 @@
+---
+# Infra edge hosts (atlas-infra-edge roles).
+# Vars: group_vars/all/atlas-infra-edge.yml, role defaults, or EXTRA_VARS_FILE / -e @secrets.yml
+# Targeting: infra_platform_hosts (inventory group name; default matches inventory-example.yml).
+#
+# Do not put role tag unions on the play: Ansible inherits play tags onto every task, so
+# --tags <one_role> would re-run the whole remote play. Keep tags on roles / include_role
+# only. Explicit setup + end_play pre_tasks list the same tag unions so facts / gates still
+# run for any selected remote tag, while workspace/validate-only skips SSH (untagged remote
+# tasks are skipped under --tags).
+
+- hosts: localhost
+  gather_facts: false
+  tags: [00_ensure_workspace]
+  roles:
+    - role: 00_ensure_workspace
+
+- hosts: localhost
+  gather_facts: false
+  tags: [01_validate_vars]
+  roles:
+    - role: 01_validate_vars
+      tags: 01_validate_vars
+
+- hosts: localhost
+  gather_facts: false
+  tags: [00_ensure_workspace]
+  tasks:
+
+    - name: Skip infra bootstrap repos when public bootstrap is disabled
+      ansible.builtin.debug:
+        msg: infra_bootstrap_public_pkg_repos=false — skipping bootstrap repo preservation
+      when:
+        - not (infra_bootstrap_public_pkg_repos | default(false) | bool)
+
+    - name: Skip bind setup when setup_bind is disabled
+      ansible.builtin.debug:
+        msg: setup_bind=false — skipping bind compose role
+      when:
+        - not (setup_bind | default(false) | bool)
+
+    - name: Skip NTP setup when setup_ntp is disabled
+      ansible.builtin.debug:
+        msg: setup_ntp=false — skipping NTP compose role
+      when:
+        - not (setup_ntp | default(false) | bool)
+
+    - name: Skip step-ca setup when setup_stepca is disabled
+      ansible.builtin.debug:
+        msg: setup_stepca=false — skipping step-ca compose role
+      when:
+        - not (setup_stepca | default(false) | bool)
+
+    - name: Skip registry setup when internal pull-through registry is disabled
+      ansible.builtin.debug:
+        msg: >-
+          use_internal_docker_registry={{ use_internal_docker_registry | default('none') }}
+          — skipping registry compose role (mode must be registry)
+      when:
+        - not (setup_registry | default(false) | bool)
+
+    - name: Skip registry nginx setup when registry pull-through ingress is disabled
+      ansible.builtin.debug:
+        msg: >-
+          use_internal_docker_registry={{ use_internal_docker_registry | default('none') }}
+          — skipping registry nginx compose role
+      when:
+        - setup_registry | default(false) | bool
+        - not (setup_registry_nginx | default(false) | bool)
+
+    - name: Skip pkg-repo nginx setup when APT/RPM cache ingress is disabled
+      ansible.builtin.debug:
+        msg: >-
+          setup_pkg_repo_nginx={{ setup_pkg_repo_nginx | default(false) }}
+          — skipping pkg-repo nginx compose role (need setup_pkg_repo_nginx=true)
+      when:
+        - not (setup_apt_rpm_nginx | default(false) | bool)
+
+    - name: Skip helm-repo nginx setup when Helm chart cache ingress is disabled
+      ansible.builtin.debug:
+        msg: >-
+          use_internal_helm_repo={{ use_internal_helm_repo | default('nexus') }},
+          setup_helm_repo_nginx={{ setup_helm_repo_nginx | default(false) }}
+          — skipping helm-repo nginx compose role (need mode=nginx and setup_helm_repo_nginx=true)
+      when:
+        - not (setup_helm_nginx | default(false) | bool)
+
+    - name: Skip custom nginx setup when custom content ingress is disabled
+      ansible.builtin.debug:
+        msg: >-
+          get_snapshotter={{ get_snapshotter | default('github') }},
+          setup_custom_nginx={{ setup_custom_nginx | default(false) }}
+          — skipping custom nginx compose role (need get_snapshotter=internal-nginx and setup_custom_nginx=true)
+      when:
+        - not (setup_custom_content_nginx | default(false) | bool)
+
+    - name: Skip compose systemd setup when setup_compose_systemd is disabled
+      ansible.builtin.debug:
+        msg: setup_compose_systemd=false — skipping compose systemd units
+      when:
+        - not (setup_compose_systemd | default(false) | bool)
+
+    - name: Skip infra cache mirror sync when not enabled
+      ansible.builtin.debug:
+        msg: nginx_cache_sync_enabled=false — skipping infra cache mirror sync (on-demand role)
+      when:
+        - not (nginx_cache_sync_enabled | default(false) | bool)
+
+    - name: Skip infra cache seed load when not enabled
+      ansible.builtin.debug:
+        msg: infra_cache_seed_load_enabled=false — skipping OCI seed load
+      when:
+        - not (infra_cache_seed_load_enabled | default(false) | bool)
+
+    - name: Skip infra cache seed publish when not enabled
+      ansible.builtin.debug:
+        msg: infra_cache_seed_publish_enabled=false — skipping OCI seed publish
+      when:
+        - not (infra_cache_seed_publish_enabled | default(false) | bool)
+
+# Docker engine on infra platform hosts.
+# No play-level tag union (would inherit onto every role). Tags live on roles / pre_tasks only.
+- hosts: "{{ infra_platform_hosts | default('infra_platform') }}"
+  become: true
+  gather_facts: false
+  strategy: linear
+  pre_tasks:
+    - name: Gather facts for docker roles
+      ansible.builtin.setup:
+      tags:
+        - 00_bootstrap_infra_repos
+        - bootstrap_infra_repos
+        - 01_install_docker_engine
+        - install_docker
+        - 02_configure_docker_daemon
+        - configure_docker
+
+  roles:
+    - role: 00-bootstrap-infra-repos
+      tags: [00_bootstrap_infra_repos, bootstrap_infra_repos]
+      when: infra_bootstrap_public_pkg_repos | default(false) | bool
+    - role: 01-install-docker-engine
+      tags: [01_install_docker_engine, install_docker]
+    - role: 02-configure-docker-daemon
+      tags: [02_configure_docker_daemon, configure_docker]
+
+# include_role: apply.tags is required — otherwise --tags only runs the include wrapper.
+# No play-level tag union (would make every --tags re-run the whole compose play).
+- hosts: "{{ infra_platform_hosts | default('infra_platform') }}"
+  become: true
+  gather_facts: false
+  strategy: linear
+  pre_tasks:
+    - name: Gather facts for compose roles
+      ansible.builtin.setup:
+      tags:
+        - 06_enable_compose_systemd
+        - 06_enable_compose_systemd_deploy
+        - 06_enable_compose_systemd_reconcile
+        - compose_systemd
+        - 03_deploy_bind_compose
+        - bind
+        - deploy_bind
+        - 12_deploy_ntp_compose
+        - ntp
+        - deploy_ntp
+        - 04_deploy_stepca_compose
+        - stepca
+        - deploy_stepca
+        - 05_deploy_registry_compose
+        - registry
+        - deploy_registry
+        - 07_deploy_registry_nginx_compose
+        - registry_nginx
+        - deploy_registry_nginx
+        - 08_deploy_pkg_repo_nginx_compose
+        - pkg_repo_nginx
+        - deploy_pkg_repo_nginx
+        - 09_deploy_helm_repo_nginx_compose
+        - helm_repo_nginx
+        - deploy_helm_repo_nginx
+        - helm_repo_cache_warm
+        - 10_deploy_custom_nginx_compose
+        - custom_nginx
+        - deploy_custom_nginx
+        - 13_deploy_infra_stats
+        - infra_stats
+        - deploy_infra_stats
+        - 11_sync_infra_cache
+        - 11_sync_infra_cache_pull
+        - 11_sync_infra_cache_push
+        - 14_infra_cache_seed
+        - 14_infra_cache_seed_load
+        - 14_infra_cache_seed_publish
+        - compose_render
+        - compose_pull
+        - compose_start_core
+        - compose_start_registry
+        - compose_reconcile
+
+  tasks:
+    # Phase 3 canonical cold path (runs on untagged / --tags all).
+    # Legacy per-role tags run only when explicitly selected (not on full play).
+
+    - name: Teardown NTP compose stack when disabled
+      ansible.builtin.include_role:
+        name: 12-deploy-ntp-compose
+        tasks_from: teardown.yaml
+        apply:
+          tags:
+            - 12_deploy_ntp_compose
+            - ntp
+            - deploy_ntp
+            - compose_render
+      tags: [12_deploy_ntp_compose, ntp, deploy_ntp, compose_render]
+      when:
+        - not (setup_ntp | default(false) | bool)
+        - >-
+          ('all' in ansible_run_tags)
+          or ('compose_render' in ansible_run_tags)
+          or ('12_deploy_ntp_compose' in ansible_run_tags)
+          or ('ntp' in ansible_run_tags)
+          or ('deploy_ntp' in ansible_run_tags)
+
+    - name: Teardown APT/RPM nginx HTTPS cache when ingress is disabled
+      ansible.builtin.include_role:
+        name: 08-deploy-pkg-repo-nginx-compose
+        tasks_from: teardown.yaml
+        apply:
+          tags:
+            - 08_deploy_pkg_repo_nginx_compose
+            - pkg_repo_nginx
+            - deploy_pkg_repo_nginx
+            - compose_render
+      tags: [08_deploy_pkg_repo_nginx_compose, pkg_repo_nginx, deploy_pkg_repo_nginx, compose_render]
+      when:
+        - not (setup_apt_rpm_nginx | default(false) | bool)
+        - >-
+          ('all' in ansible_run_tags)
+          or ('compose_render' in ansible_run_tags)
+          or ('08_deploy_pkg_repo_nginx_compose' in ansible_run_tags)
+          or ('pkg_repo_nginx' in ansible_run_tags)
+          or ('deploy_pkg_repo_nginx' in ansible_run_tags)
+
+    - name: Teardown Helm chart nginx HTTPS cache when ingress is disabled
+      ansible.builtin.include_role:
+        name: 09-deploy-helm-repo-nginx-compose
+        tasks_from: teardown.yaml
+        apply:
+          tags:
+            - 09_deploy_helm_repo_nginx_compose
+            - helm_repo_nginx
+            - deploy_helm_repo_nginx
+            - compose_render
+      tags: [09_deploy_helm_repo_nginx_compose, helm_repo_nginx, deploy_helm_repo_nginx, compose_render]
+      when:
+        - not (setup_helm_nginx | default(false) | bool)
+        - >-
+          ('all' in ansible_run_tags)
+          or ('compose_render' in ansible_run_tags)
+          or ('09_deploy_helm_repo_nginx_compose' in ansible_run_tags)
+          or ('helm_repo_nginx' in ansible_run_tags)
+          or ('deploy_helm_repo_nginx' in ansible_run_tags)
+
+    - name: Teardown custom nginx HTTPS static content when ingress is disabled
+      ansible.builtin.include_role:
+        name: 10-deploy-custom-nginx-compose
+        tasks_from: teardown.yaml
+        apply:
+          tags:
+            - 10_deploy_custom_nginx_compose
+            - custom_nginx
+            - deploy_custom_nginx
+            - compose_render
+      tags: [10_deploy_custom_nginx_compose, custom_nginx, deploy_custom_nginx, compose_render]
+      when:
+        - not (setup_custom_content_nginx | default(false) | bool)
+        - >-
+          ('all' in ansible_run_tags)
+          or ('compose_render' in ansible_run_tags)
+          or ('10_deploy_custom_nginx_compose' in ansible_run_tags)
+          or ('custom_nginx' in ansible_run_tags)
+          or ('deploy_custom_nginx' in ansible_run_tags)
+
+    - name: Teardown infra-stats page when disabled
+      ansible.builtin.include_role:
+        name: 13-deploy-infra-stats
+        tasks_from: teardown.yaml
+        apply:
+          tags:
+            - 13_deploy_infra_stats
+            - infra_stats
+            - deploy_infra_stats
+            - compose_render
+      tags: [13_deploy_infra_stats, infra_stats, deploy_infra_stats, compose_render]
+      when:
+        - not (setup_infra_stats | default(false) | bool)
+        - >-
+          ('all' in ansible_run_tags)
+          or ('compose_render' in ansible_run_tags)
+          or ('13_deploy_infra_stats' in ansible_run_tags)
+          or ('infra_stats' in ansible_run_tags)
+          or ('deploy_infra_stats' in ansible_run_tags)
+
+    - name: Compose render all enabled stacks
+      ansible.builtin.include_role:
+        name: 06-enable-compose-systemd
+        tasks_from: compose_render.yaml
+        apply:
+          tags:
+            - compose_render
+            - 06_enable_compose_systemd
+            - 06_enable_compose_systemd_deploy
+            - compose_systemd
+      tags:
+        - compose_render
+        - 06_enable_compose_systemd
+        - 06_enable_compose_systemd_deploy
+        - compose_systemd
+      when:
+        - setup_compose_systemd | default(false) | bool
+        - >-
+          ('all' in ansible_run_tags)
+          or ('compose_render' in ansible_run_tags)
+          or ('06_enable_compose_systemd_deploy' in ansible_run_tags)
+          or ('06_enable_compose_systemd' in ansible_run_tags)
+          or ('compose_systemd' in ansible_run_tags)
+
+    - name: Compose pull images once
+      ansible.builtin.include_role:
+        name: 06-enable-compose-systemd
+        tasks_from: compose_pull.yaml
+        apply:
+          tags:
+            - compose_pull
+      tags: [compose_pull]
+      when:
+        - setup_compose_systemd | default(false) | bool
+        - >-
+          ('all' in ansible_run_tags)
+          or ('compose_pull' in ansible_run_tags)
+
+    - name: Compose start core group
+      ansible.builtin.include_role:
+        name: 06-enable-compose-systemd
+        tasks_from: compose_start_group.yaml
+        apply:
+          tags:
+            - compose_start_core
+      tags: [compose_start_core]
+      vars:
+        compose_start_group: core
+      when:
+        - setup_compose_systemd | default(false) | bool
+        - >-
+          ('all' in ansible_run_tags)
+          or ('compose_start_core' in ansible_run_tags)
+
+    - name: Load infra cache seed image (before registry start)
+      tags: [14_infra_cache_seed, 14_infra_cache_seed_load]
+      when:
+        - infra_cache_seed_load_enabled | default(false) | bool
+        - >-
+          ('all' in ansible_run_tags)
+          or ('14_infra_cache_seed' in ansible_run_tags)
+          or ('14_infra_cache_seed_load' in ansible_run_tags)
+      block:
+        - name: Begin 14_infra_cache_seed_load timing
+          ansible.builtin.include_role:
+            name: 06-enable-compose-systemd
+            tasks_from: compose_timing_begin.yaml
+          vars:
+            compose_timing_phase: 14_infra_cache_seed_load
+
+        - name: Load infra cache seed onto host bind-mounts
+          ansible.builtin.include_role:
+            name: 14-infra-cache-seed
+            tasks_from: load.yaml
+
+        - name: End 14_infra_cache_seed_load timing
+          ansible.builtin.include_role:
+            name: 06-enable-compose-systemd
+            tasks_from: compose_timing_end.yaml
+          vars:
+            compose_timing_phase: 14_infra_cache_seed_load
+
+    - name: Pull infra cache mirror from remote (before registry start)
+      tags: [11_sync_infra_cache, 11_sync_infra_cache_pull]
+      when:
+        - nginx_cache_sync_enabled | default(false) | bool
+        - not (infra_cache_seed_load_enabled | default(false) | bool)
+        - nginx_cache_sync_direction | default('pull') == 'pull'
+        - >-
+          ('all' in ansible_run_tags)
+          or ('11_sync_infra_cache' in ansible_run_tags)
+          or ('11_sync_infra_cache_pull' in ansible_run_tags)
+      block:
+        - name: Begin 11_sync_infra_cache_pull timing
+          ansible.builtin.include_role:
+            name: 06-enable-compose-systemd
+            tasks_from: compose_timing_begin.yaml
+          vars:
+            compose_timing_phase: 11_sync_infra_cache_pull
+
+        - name: Pull infra cache mirror from remote
+          ansible.builtin.include_role:
+            name: 11-sync-infra-cache
+
+        - name: End 11_sync_infra_cache_pull timing
+          ansible.builtin.include_role:
+            name: 06-enable-compose-systemd
+            tasks_from: compose_timing_end.yaml
+          vars:
+            compose_timing_phase: 11_sync_infra_cache_pull
+
+    - name: Compose start registry group
+      ansible.builtin.include_role:
+        name: 06-enable-compose-systemd
+        tasks_from: compose_start_group.yaml
+        apply:
+          tags:
+            - compose_start_registry
+      tags: [compose_start_registry]
+      vars:
+        compose_start_group: registry
+      when:
+        - setup_compose_systemd | default(false) | bool
+        - >-
+          ('all' in ansible_run_tags)
+          or ('compose_start_registry' in ansible_run_tags)
+
+    - name: Compose reconcile pending restarts
+      ansible.builtin.include_role:
+        name: 06-enable-compose-systemd
+        tasks_from: reconcile.yaml
+        apply:
+          tags:
+            - compose_reconcile
+            - 06_enable_compose_systemd
+            - 06_enable_compose_systemd_reconcile
+            - compose_systemd
+      tags:
+        - compose_reconcile
+        - 06_enable_compose_systemd
+        - 06_enable_compose_systemd_reconcile
+        - compose_systemd
+      when:
+        - setup_compose_systemd | default(false) | bool
+        - >-
+          ('all' in ansible_run_tags)
+          or ('compose_reconcile' in ansible_run_tags)
+          or ('06_enable_compose_systemd_reconcile' in ansible_run_tags)
+          or ('06_enable_compose_systemd' in ansible_run_tags)
+          or ('compose_systemd' in ansible_run_tags)
+
+    - name: Push infra cache mirror to remote (after compose reconcile)
+      tags: [11_sync_infra_cache, 11_sync_infra_cache_push]
+      when:
+        - nginx_cache_sync_enabled | default(false) | bool
+        - nginx_cache_sync_direction | default('pull') == 'push'
+        - >-
+          ('all' in ansible_run_tags)
+          or ('11_sync_infra_cache' in ansible_run_tags)
+          or ('11_sync_infra_cache_push' in ansible_run_tags)
+      block:
+        - name: Begin 11_sync_infra_cache_push timing
+          ansible.builtin.include_role:
+            name: 06-enable-compose-systemd
+            tasks_from: compose_timing_begin.yaml
+          vars:
+            compose_timing_phase: 11_sync_infra_cache_push
+
+        - name: Push infra cache mirror to remote
+          ansible.builtin.include_role:
+            name: 11-sync-infra-cache
+
+        - name: End 11_sync_infra_cache_push timing
+          ansible.builtin.include_role:
+            name: 06-enable-compose-systemd
+            tasks_from: compose_timing_end.yaml
+          vars:
+            compose_timing_phase: 11_sync_infra_cache_push
+
+    - name: Publish infra cache seed image (after compose reconcile)
+      tags: [14_infra_cache_seed, 14_infra_cache_seed_publish]
+      when:
+        - infra_cache_seed_publish_enabled | default(false) | bool
+        - >-
+          ('all' in ansible_run_tags)
+          or ('14_infra_cache_seed' in ansible_run_tags)
+          or ('14_infra_cache_seed_publish' in ansible_run_tags)
+      block:
+        - name: Begin 14_infra_cache_seed_publish timing
+          ansible.builtin.include_role:
+            name: 06-enable-compose-systemd
+            tasks_from: compose_timing_begin.yaml
+          vars:
+            compose_timing_phase: 14_infra_cache_seed_publish
+
+        - name: Publish infra cache seed image
+          ansible.builtin.include_role:
+            name: 14-infra-cache-seed
+            tasks_from: publish.yaml
+
+        - name: End 14_infra_cache_seed_publish timing
+          ansible.builtin.include_role:
+            name: 06-enable-compose-systemd
+            tasks_from: compose_timing_end.yaml
+          vars:
+            compose_timing_phase: 14_infra_cache_seed_publish
+
+    # Legacy single-tag ops (explicit --tags only; skipped on full / --tags all).
+    # Phase 5: these hit thin main.yaml (= render.yaml; step-ca also bootstrap).
+    # They do not pull images or start stacks — use compose_pull / compose_start_*.
+    - name: Deploy bind compose stack configuration (legacy tag)
+      ansible.builtin.include_role:
+        name: 03-deploy-bind-compose
+        apply:
+          tags:
+            - 03_deploy_bind_compose
+            - bind
+            - deploy_bind
+      tags: [03_deploy_bind_compose, bind, deploy_bind]
+      when:
+        - setup_bind | default(false) | bool
+        - "'all' not in ansible_run_tags"
+        - >-
+          ('03_deploy_bind_compose' in ansible_run_tags)
+          or ('bind' in ansible_run_tags)
+          or ('deploy_bind' in ansible_run_tags)
+
+    - name: Deploy NTP compose stack configuration (legacy tag)
+      ansible.builtin.include_role:
+        name: 12-deploy-ntp-compose
+        apply:
+          tags:
+            - 12_deploy_ntp_compose
+            - ntp
+            - deploy_ntp
+      tags: [12_deploy_ntp_compose, ntp, deploy_ntp]
+      when:
+        - setup_ntp | default(false) | bool
+        - "'all' not in ansible_run_tags"
+        - >-
+          ('12_deploy_ntp_compose' in ansible_run_tags)
+          or ('ntp' in ansible_run_tags)
+          or ('deploy_ntp' in ansible_run_tags)
+
+    - name: Deploy step-ca compose stack configuration (legacy tag)
+      ansible.builtin.include_role:
+        name: 04-deploy-stepca-compose
+        apply:
+          tags:
+            - 04_deploy_stepca_compose
+            - stepca
+            - deploy_stepca
+      tags: [04_deploy_stepca_compose, stepca, deploy_stepca]
+      when:
+        - setup_stepca | default(false) | bool
+        - "'all' not in ansible_run_tags"
+        - >-
+          ('04_deploy_stepca_compose' in ansible_run_tags)
+          or ('stepca' in ansible_run_tags)
+          or ('deploy_stepca' in ansible_run_tags)
+
+    - name: Deploy registry compose stack configuration (legacy tag)
+      ansible.builtin.include_role:
+        name: 05-deploy-registry-compose
+        apply:
+          tags:
+            - 05_deploy_registry_compose
+            - registry
+            - deploy_registry
+      tags: [05_deploy_registry_compose, registry, deploy_registry]
+      when:
+        - setup_registry | default(false) | bool
+        - "'all' not in ansible_run_tags"
+        - >-
+          ('05_deploy_registry_compose' in ansible_run_tags)
+          or ('registry' in ansible_run_tags)
+          or ('deploy_registry' in ansible_run_tags)
+
+    - name: Deploy registry nginx HTTPS ingress (legacy tag)
+      ansible.builtin.include_role:
+        name: 07-deploy-registry-nginx-compose
+        apply:
+          tags:
+            - 07_deploy_registry_nginx_compose
+            - registry_nginx
+            - deploy_registry_nginx
+      tags: [07_deploy_registry_nginx_compose, registry_nginx, deploy_registry_nginx]
+      when:
+        - setup_registry | default(false) | bool
+        - setup_registry_nginx | default(false) | bool
+        - "'all' not in ansible_run_tags"
+        - >-
+          ('07_deploy_registry_nginx_compose' in ansible_run_tags)
+          or ('registry_nginx' in ansible_run_tags)
+          or ('deploy_registry_nginx' in ansible_run_tags)
+
+    - name: Deploy APT/RPM nginx HTTPS cache (legacy tag)
+      ansible.builtin.include_role:
+        name: 08-deploy-pkg-repo-nginx-compose
+        apply:
+          tags:
+            - 08_deploy_pkg_repo_nginx_compose
+            - pkg_repo_nginx
+            - deploy_pkg_repo_nginx
+      tags: [08_deploy_pkg_repo_nginx_compose, pkg_repo_nginx, deploy_pkg_repo_nginx]
+      when:
+        - setup_apt_rpm_nginx | default(false) | bool
+        - "'all' not in ansible_run_tags"
+        - >-
+          ('08_deploy_pkg_repo_nginx_compose' in ansible_run_tags)
+          or ('pkg_repo_nginx' in ansible_run_tags)
+          or ('deploy_pkg_repo_nginx' in ansible_run_tags)
+
+    - name: Deploy Helm chart nginx HTTPS cache (legacy tag)
+      ansible.builtin.include_role:
+        name: 09-deploy-helm-repo-nginx-compose
+        apply:
+          tags:
+            - 09_deploy_helm_repo_nginx_compose
+            - helm_repo_nginx
+            - deploy_helm_repo_nginx
+      # Do not attach helm_repo_cache_warm here — that tag is owned by the warm-only include.
+      tags: [09_deploy_helm_repo_nginx_compose, helm_repo_nginx, deploy_helm_repo_nginx]
+      when:
+        - setup_helm_nginx | default(false) | bool
+        - "'all' not in ansible_run_tags"
+        - >-
+          ('09_deploy_helm_repo_nginx_compose' in ansible_run_tags)
+          or ('helm_repo_nginx' in ansible_run_tags)
+          or ('deploy_helm_repo_nginx' in ansible_run_tags)
+
+    - name: Warm Helm chart nginx proxy cache (explicit tag only)
+      ansible.builtin.include_role:
+        name: 09-deploy-helm-repo-nginx-compose
+        tasks_from: warm_cache.yaml
+        apply:
+          tags:
+            - helm_repo_cache_warm
+      tags: [helm_repo_cache_warm]
+      when:
+        - setup_helm_nginx | default(false) | bool
+        - "'all' not in ansible_run_tags"
+        - "'helm_repo_cache_warm' in ansible_run_tags"
+
+    - name: Deploy custom nginx HTTPS static content (legacy tag)
+      ansible.builtin.include_role:
+        name: 10-deploy-custom-nginx-compose
+        apply:
+          tags:
+            - 10_deploy_custom_nginx_compose
+            - custom_nginx
+            - deploy_custom_nginx
+      tags: [10_deploy_custom_nginx_compose, custom_nginx, deploy_custom_nginx]
+      when:
+        - setup_custom_content_nginx | default(false) | bool
+        - "'all' not in ansible_run_tags"
+        - >-
+          ('10_deploy_custom_nginx_compose' in ansible_run_tags)
+          or ('custom_nginx' in ansible_run_tags)
+          or ('deploy_custom_nginx' in ansible_run_tags)
+
+    - name: Deploy infra-stats page (legacy tag)
+      ansible.builtin.include_role:
+        name: 13-deploy-infra-stats
+        apply:
+          tags:
+            - 13_deploy_infra_stats
+            - infra_stats
+            - deploy_infra_stats
+      tags: [13_deploy_infra_stats, infra_stats, deploy_infra_stats]
+      when:
+        - setup_infra_stats | default(false) | bool
+        - "'all' not in ansible_run_tags"
+        - >-
+          ('13_deploy_infra_stats' in ansible_run_tags)
+          or ('infra_stats' in ansible_run_tags)
+          or ('deploy_infra_stats' in ansible_run_tags)

@@ -1,0 +1,115 @@
+{% for proxy in pkg_repo_proxy_upstreams %}
+server {
+    listen 443 ssl;
+    server_name {{ proxy.proxy_hostname }};
+
+    ssl_certificate /etc/nginx/pkg-certs/{{ pkg_repo_tls_cert_filename }};
+    ssl_certificate_key /etc/nginx/pkg-certs/{{ pkg_repo_tls_key_filename }};
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Variable proxy_pass so http-level resolver ipv4=on / ipv6=off applies.
+    set $pkg_repo_upstream "{{ proxy.proxy_origin }}{{ proxy.proxy_path_prefix }}";
+
+    # RPM/DNF (repodata/) indexes — short TTL, no stale/background (consistent repodata set).
+    # Explicitly disable 301/302 cache: nginx still caches redirects by default via
+    # Cache-Control/Expires unless TTL is 0 (packages.gitlab.com → GCS signed URLs).
+    location ^~ /repodata/ {
+        proxy_pass $pkg_repo_upstream$uri$is_args$args;
+        proxy_set_header Host {{ proxy.upstream_host }};
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_ssl_server_name on;
+        proxy_ssl_name {{ proxy.upstream_host }};
+
+        proxy_cache pkg_repo_metadata_cache;
+        proxy_cache_key "$host$uri$is_args$args";
+        proxy_cache_valid 200 206 {{ pkg_repo_nginx_cache_valid_metadata }};
+        proxy_cache_valid 404 {{ pkg_repo_nginx_cache_valid_metadata_not_found }};
+        proxy_cache_valid 301 302 0;
+        proxy_ignore_headers Cache-Control Expires Set-Cookie;
+        proxy_cache_background_update off;
+        proxy_cache_use_stale off;
+        proxy_cache_revalidate on;
+        proxy_cache_lock on;
+        add_header X-Cache-Status $upstream_cache_status;
+
+        proxy_buffering on;
+        proxy_connect_timeout {{ pkg_repo_nginx_proxy_connect_timeout | default('10s') }};
+        proxy_read_timeout {{ pkg_repo_nginx_proxy_read_timeout | default('120s') }};
+        proxy_send_timeout {{ pkg_repo_nginx_proxy_send_timeout | default('120s') }};
+    }
+
+    # APT metadata under dists/ — Release/InRelease bypass cache (anchor for apt snapshot).
+    # Same 301/302 TTL 0 + ignore_headers as blobs (signed redirect hazard).
+    location ^~ /dists/ {
+        proxy_pass $pkg_repo_upstream$uri$is_args$args;
+        proxy_set_header Host {{ proxy.upstream_host }};
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_ssl_server_name on;
+        proxy_ssl_name {{ proxy.upstream_host }};
+
+        proxy_no_cache $pkg_repo_skip_metadata_cache;
+        proxy_cache_bypass $pkg_repo_skip_metadata_cache;
+        proxy_cache pkg_repo_metadata_cache;
+        proxy_cache_key "$host$uri$is_args$args";
+        proxy_cache_valid 200 206 {{ pkg_repo_nginx_cache_valid_metadata }};
+        proxy_cache_valid 404 {{ pkg_repo_nginx_cache_valid_metadata_not_found }};
+        proxy_cache_valid 301 302 0;
+        proxy_ignore_headers Cache-Control Expires Set-Cookie;
+        proxy_cache_background_update off;
+        proxy_cache_use_stale off;
+        proxy_cache_revalidate on;
+        proxy_cache_lock on;
+        add_header X-Cache-Status $upstream_cache_status;
+
+        proxy_buffering on;
+        proxy_connect_timeout {{ pkg_repo_nginx_proxy_connect_timeout | default('10s') }};
+        proxy_read_timeout {{ pkg_repo_nginx_proxy_read_timeout | default('120s') }};
+        proxy_send_timeout {{ pkg_repo_nginx_proxy_send_timeout | default('120s') }};
+    }
+
+    # Package blobs (pool/, Packages/, *.rpm, etc.) — long cache TTL for bodies only.
+    # Never cache 301/302 (GCS signed Location expires ~24h).
+    location / {
+        proxy_pass $pkg_repo_upstream$uri$is_args$args;
+        proxy_set_header Host {{ proxy.upstream_host }};
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_ssl_server_name on;
+        proxy_ssl_name {{ proxy.upstream_host }};
+
+        proxy_cache pkg_repo_blob_cache;
+        proxy_cache_key "$host$uri$is_args$args";
+        proxy_cache_valid 200 206 {{ pkg_repo_nginx_cache_valid_success }};
+        proxy_cache_valid 404 {{ pkg_repo_nginx_cache_valid_not_found }};
+        proxy_cache_valid 301 302 0;
+        proxy_ignore_headers Cache-Control Expires Set-Cookie;
+        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+        proxy_cache_background_update on;
+        proxy_cache_lock on;
+        add_header X-Cache-Status $upstream_cache_status;
+
+        proxy_buffering on;
+        proxy_connect_timeout {{ pkg_repo_nginx_proxy_connect_timeout | default('10s') }};
+        proxy_read_timeout {{ pkg_repo_nginx_proxy_read_timeout | default('120s') }};
+        proxy_send_timeout {{ pkg_repo_nginx_proxy_send_timeout | default('120s') }};
+    }
+}
+{% endfor %}
+
+server {
+    listen 443 ssl;
+    server_name {{ pkg_repo_nginx_host }};
+
+    ssl_certificate /etc/nginx/pkg-certs/{{ pkg_repo_tls_cert_filename }};
+    ssl_certificate_key /etc/nginx/pkg-certs/{{ pkg_repo_tls_key_filename }};
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    location / {
+        return 404;
+    }
+}

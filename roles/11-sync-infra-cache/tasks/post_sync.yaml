@@ -1,0 +1,26 @@
+---
+# Defer warm to compose_start_registry / reconcile when systemd path is used.
+# Sync-only tag runs still set pending so a later reconcile can warm.
+# Only runs after a successful mutation block (not from always/restart).
+
+- name: Persist pkg-repo cache warm pending in fact cache until compose start/reconcile
+  ansible.builtin.set_fact:
+    pkg_repo_cache_warm_pending: true
+    cacheable: true
+  when:
+    - nginx_cache_sync_direction == 'pull'
+    - nginx_cache_sync_warm_after_pull | default(true) | bool
+    - nginx_cache_sync_pkg_repo_enabled | bool
+    - pkg_repo_nginx_cache_warm_enabled | default(true) | bool
+    - setup_compose_systemd | default(false) | bool
+
+- name: Warm pkg-repo nginx metadata cache after infra cache pull (non-systemd hosts)
+  ansible.builtin.include_role:
+    name: 08-deploy-pkg-repo-nginx-compose
+    tasks_from: warm_cache.yaml
+  when:
+    - nginx_cache_sync_direction == 'pull'
+    - nginx_cache_sync_warm_after_pull | default(true) | bool
+    - nginx_cache_sync_pkg_repo_enabled | bool
+    - pkg_repo_nginx_cache_warm_enabled | default(true) | bool
+    - not (setup_compose_systemd | default(false) | bool)

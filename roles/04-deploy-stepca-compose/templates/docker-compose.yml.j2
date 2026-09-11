@@ -1,0 +1,21 @@
+services:
+  ca:
+    image: "{{ stepca_image }}"
+    container_name: "{{ stepca_container_name }}"
+    user: "{{ stepca_user }}"
+    restart: unless-stopped
+    dns:
+      - {{ dns_server_ip }}
+    ports:
+      - "{{ stepca_listen_ip }}:{{ stepca_https_port }}:{{ stepca_container_https_port }}/tcp"
+      - "{{ stepca_listen_ip }}:{{ stepca_ocsp_port }}:{{ stepca_ocsp_port }}/tcp"
+    environment:
+      - DOCKER_STEPCA_INIT_NAME={{ stepca_init_name }}
+      - DOCKER_STEPCA_INIT_DNS_NAMES={{ stepca_init_dns_names }}
+      - DOCKER_STEPCA_INIT_PASSWORD={{ stepca_init_password }}
+      - DOCKER_STEPCA_INIT_PROVISIONER_NAME={{ stepca_init_provisioner_name }}
+{% if stepca_init_acme | default(false) | bool %}
+      - DOCKER_STEPCA_INIT_ACME=true
+{% endif %}
+    volumes:
+      - {{ stepca_data_dir }}:/home/step

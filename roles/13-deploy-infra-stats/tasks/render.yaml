@@ -1,0 +1,200 @@
+---
+# Phase 1 render: dirs, TLS scripts, publish HTML/JSON, vhost + mark registry nginx pending.
+# TLS cert issue needs provisioned step-ca — deferred to pre_start on cold path.
+# Page content is refreshed again in pre_start after peer TLS is issued.
+
+- name: Require step-ca when infra-stats TLS is enabled
+  ansible.builtin.assert:
+    that:
+      - setup_stepca | default(false) | bool
+    fail_msg: infra_stats_tls_enabled requires setup_stepca=true.
+  when: infra_stats_tls_enabled | default(false) | bool
+
+- name: Require shared registry nginx for infra-stats
+  ansible.builtin.assert:
+    that:
+      - setup_registry_nginx | default(false) | bool
+      - infra_stats_shared_with_registry | default(true) | bool
+    fail_msg: >-
+      setup_infra_stats requires setup_registry_nginx=true and
+      infra_stats_shared_with_registry=true (static page mounts into registry-nginx).
+
+- name: Check step-ca provision state for infra-stats TLS
+  ansible.builtin.stat:
+    path: "{{ stepca_provisioned_marker }}"
+  register: stepca_provisioned_for_infra_stats_tls
+  when: infra_stats_tls_enabled | default(false) | bool
+
+- name: Defer infra-stats TLS cert issue until step-ca is provisioned
+  ansible.builtin.debug:
+    msg: >-
+      step-ca not provisioned yet (missing {{ stepca_provisioned_marker }});
+      deferring infra-stats TLS issue to compose_start_registry pre_start.
+  when:
+    - infra_stats_tls_enabled | default(false) | bool
+    - not (stepca_provisioned_for_infra_stats_tls.stat.exists | default(false))
+
+- name: Ensure infra-stats directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ infra_stats_config_dir }}"
+    - "{{ infra_stats_vhosts_dir }}"
+    - "{{ infra_stats_html_dir }}"
+    - "{{ infra_stats_scrape_dir }}"
+    - "{{ infra_stats_compose_project_dir }}"
+    - "{{ infra_stats_compose_project_dir }}/templates"
+
+- name: Ensure infra-stats TLS directory exists
+  ansible.builtin.file:
+    path: "{{ infra_stats_tls_dir }}"
+    state: directory
+    mode: "0755"
+  when: infra_stats_tls_enabled | default(false) | bool
+
+- name: Install python3-jinja2 for infra-stats host refresh (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name: python3-jinja2
+    state: present
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Install python3-jinja2 for infra-stats host refresh (Red Hat family)
+  ansible.builtin.dnf:
+    name: python3-jinja2
+    state: present
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Deploy infra-stats refresh Python scraper/renderer
+  ansible.builtin.template:
+    src: refresh_infra_stats.py.j2
+    dest: "{{ infra_stats_compose_project_dir }}/refresh_infra_stats.py"
+    mode: "0755"
+
+- name: Deploy infra-stats refresh shell wrapper
+  ansible.builtin.template:
+    src: refresh-infra-stats.sh.j2
+    dest: "{{ infra_stats_compose_project_dir }}/refresh-infra-stats.sh"
+    mode: "0755"
+
+- name: Deploy raw infra-stats HTML Jinja template for host refresh
+  ansible.builtin.copy:
+    src: "{{ role_path }}/templates/stats.html.j2"
+    dest: "{{ infra_stats_compose_project_dir }}/templates/stats.html.j2"
+    mode: "0644"
+
+- name: Deploy infra-stats TLS certificate issuance script
+  ansible.builtin.template:
+    src: issue-infra-stats-tls-cert.sh.j2
+    dest: "{{ infra_stats_compose_project_dir }}/issue-infra-stats-tls-cert.sh"
+    mode: "0700"
+  register: infra_stats_issue_script_deployed
+  when: infra_stats_tls_enabled | default(false) | bool
+
+- name: Install cron package for infra-stats jobs (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name: cron
+    state: present
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - >-
+      (infra_stats_tls_enabled | default(false) | bool
+       and infra_stats_tls_cron_enabled | default(false) | bool)
+      or (infra_stats_refresh_cron_enabled | default(false) | bool)
+
+- name: Install cron package for infra-stats jobs (Red Hat family)
+  ansible.builtin.dnf:
+    name: cronie
+    state: present
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - >-
+      (infra_stats_tls_enabled | default(false) | bool
+       and infra_stats_tls_cron_enabled | default(false) | bool)
+      or (infra_stats_refresh_cron_enabled | default(false) | bool)
+
+- name: Deploy infra-stats TLS renewal script
+  ansible.builtin.template:
+    src: renew-infra-stats-tls-cert.sh.j2
+    dest: "{{ infra_stats_compose_project_dir }}/renew-infra-stats-tls-cert.sh"
+    mode: "0700"
+  when:
+    - infra_stats_tls_enabled | default(false) | bool
+    - infra_stats_tls_cron_enabled | default(false) | bool
+
+- name: Install infra-stats TLS renewal cron job
+  ansible.builtin.template:
+    src: infra-stats-tls-renew.cron.j2
+    dest: /etc/cron.d/infra-stats-tls-renew
+    mode: "0644"
+  when:
+    - infra_stats_tls_enabled | default(false) | bool
+    - infra_stats_tls_cron_enabled | default(false) | bool
+
+- name: Resolve cron systemd unit for infra-stats jobs
+  ansible.builtin.set_fact:
+    infra_stats_tls_cron_systemd_unit: >-
+      {{
+        infra_stats_tls_cron_systemd_unit_override | default('')
+        if (infra_stats_tls_cron_systemd_unit_override | default('') | length > 0)
+        else ('crond' if ansible_facts['os_family'] == 'RedHat' else 'cron')
+      }}
+  when: >-
+    (infra_stats_tls_enabled | default(false) | bool
+     and infra_stats_tls_cron_enabled | default(false) | bool)
+    or (infra_stats_refresh_cron_enabled | default(false) | bool)
+
+- name: Ensure cron service is enabled for infra-stats jobs
+  ansible.builtin.systemd:
+    name: "{{ infra_stats_tls_cron_systemd_unit }}"
+    enabled: true
+    state: started
+  when: >-
+    (infra_stats_tls_enabled | default(false) | bool
+     and infra_stats_tls_cron_enabled | default(false) | bool)
+    or (infra_stats_refresh_cron_enabled | default(false) | bool)
+
+- name: Issue infra-stats TLS when step-ca is already provisioned
+  ansible.builtin.import_tasks: issue_tls.yaml
+  when:
+    - infra_stats_tls_enabled | default(false) | bool
+    - stepca_provisioned_for_infra_stats_tls.stat.exists | default(false)
+
+- name: Record infra-stats publish source for compose_render
+  ansible.builtin.set_fact:
+    infra_stats_publish_source: compose_render
+
+- name: Publish infra-stats HTML/JSON snapshot
+  ansible.builtin.import_tasks: publish.yaml
+
+- name: Install infra-stats refresh cron job
+  ansible.builtin.template:
+    src: infra-stats-refresh.cron.j2
+    dest: /etc/cron.d/infra-stats-refresh
+    mode: "0644"
+  when: infra_stats_refresh_cron_enabled | default(false) | bool
+
+- name: Remove infra-stats refresh cron job when disabled
+  ansible.builtin.file:
+    path: /etc/cron.d/infra-stats-refresh
+    state: absent
+  when: not (infra_stats_refresh_cron_enabled | default(false) | bool)
+
+- name: Deploy infra-stats nginx vhost configuration
+  ansible.builtin.template:
+    src: infra-stats-vhosts.conf.j2
+    dest: "{{ infra_stats_vhosts_dir }}/infra-stats-vhosts.conf"
+    mode: "0644"
+  register: infra_stats_vhosts_deployed
+
+- name: Mark registry nginx stack pending restart after infra-stats change
+  ansible.builtin.include_role:
+    name: 06-enable-compose-systemd
+    tasks_from: mark_compose_pending_restart.yaml
+  vars:
+    compose_pending_restart_units:
+      - "{{ compose_systemd_registry_nginx_unit_name }}"
+  when: >-
+    infra_stats_vhosts_deployed.changed | default(false) or
+    infra_stats_tls_cert_issued.changed | default(false)

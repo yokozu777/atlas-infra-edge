@@ -1,0 +1,88 @@
+---
+# Phase 3/6 slim reconcile: pending restarts + ensure started + warm-if-pending.
+# No full image re-pull (use compose_pull for images).
+
+- name: Begin compose_reconcile timing
+  ansible.builtin.import_tasks: compose_timing_begin.yaml
+  vars:
+    compose_timing_phase: compose_reconcile
+
+- name: Apply compose systemd unit file changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Check registry internal network for nginx ingress
+  ansible.builtin.command:
+    cmd: docker network inspect {{ registry_internal_network_name }}
+  register: registry_internal_network_inspect
+  changed_when: false
+  failed_when: false
+  when:
+    - setup_registry | default(false) | bool
+    - setup_registry_nginx | default(false) | bool
+
+- name: Ensure registry compose is restarted when internal network is missing
+  ansible.builtin.import_tasks: mark_compose_pending_restart.yaml
+  vars:
+    compose_pending_restart_units:
+      - "{{ compose_systemd_registry_unit_name }}"
+  when:
+    - setup_registry | default(false) | bool
+    - setup_registry_nginx | default(false) | bool
+    - registry_internal_network_inspect is defined
+    - registry_internal_network_inspect.rc != 0
+
+- name: Restart compose stacks pending configuration reload
+  ansible.builtin.systemd:
+    name: "{{ item }}.service"
+    state: restarted
+    daemon_reload: true
+  loop: "{{ ansible_facts.get('compose_stacks_pending_restart', []) | sort }}"
+  when: ansible_facts.get('compose_stacks_pending_restart', []) | length > 0
+
+- name: Clear compose stacks pending restart in fact cache after reload
+  ansible.builtin.import_tasks: clear_compose_pending_restart.yaml
+  when: ansible_facts.get('compose_stacks_pending_restart', []) | length > 0
+
+- name: Build compose systemd projects list for reconcile
+  ansible.builtin.import_tasks: build_compose_systemd_projects.yaml
+
+- name: Enable and start compose systemd units
+  ansible.builtin.systemd:
+    name: "{{ item.unit_name }}.service"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop: "{{ compose_systemd_projects | default([]) }}"
+
+- name: Reload registry nginx configuration inside running container
+  ansible.builtin.import_tasks: reload_registry_nginx.yaml
+  when: setup_registry_nginx | default(false) | bool
+
+- name: Wait for registry nginx container before pkg-repo cache warm
+  ansible.builtin.command:
+    cmd: docker inspect -f '{{ "{{" }}.State.Running{{ "}}" }}' {{ registry_nginx_container_name }}
+  register: registry_nginx_running_before_warm
+  until: registry_nginx_running_before_warm.stdout == 'true'
+  retries: "{{ pkg_repo_nginx_warm_container_wait_retries | default(30) }}"
+  delay: "{{ pkg_repo_nginx_warm_container_wait_delay | default(5) }}"
+  changed_when: false
+  when:
+    - setup_apt_rpm_nginx | default(false) | bool
+    - pkg_repo_nginx_cache_warm_enabled | default(true) | bool
+    - pkg_repo_cache_warm_pending | default(false) | bool
+    - pkg_repo_nginx_shared_with_registry | default(true) | bool
+    - setup_registry_nginx | default(false) | bool
+
+- name: Warm pkg-repo nginx metadata cache after compose stacks are up
+  ansible.builtin.include_role:
+    name: 08-deploy-pkg-repo-nginx-compose
+    tasks_from: warm_cache.yaml
+  when:
+    - setup_apt_rpm_nginx | default(false) | bool
+    - pkg_repo_nginx_cache_warm_enabled | default(true) | bool
+    - pkg_repo_cache_warm_pending | default(false) | bool
+
+- name: End compose_reconcile timing
+  ansible.builtin.import_tasks: compose_timing_end.yaml
+  vars:
+    compose_timing_phase: compose_reconcile

@@ -1,0 +1,20 @@
+---
+# Override via inventory / group_vars when needed.
+
+setup_infra_stats: false
+
+# Optional override for cron systemd unit (empty = auto: crond on RedHat, cron on Debian).
+infra_stats_tls_cron_systemd_unit_override: ""
+
+# Host-side scrape+render every N minutes (catalog/inventory may override).
+infra_stats_refresh_cron_enabled: true
+infra_stats_refresh_cron_minute: "*/10"
+infra_stats_refresh_cron_hour: "*"
+infra_stats_refresh_cron_dom: "*"
+infra_stats_refresh_cron_month: "*"
+infra_stats_refresh_cron_dow: "*"
+infra_stats_refresh_cron_log_file: /var/log/infra-stats-refresh.log
+
+# Cache inventory on /stats (host scrape). HTML is truncated; stats.json uses json_limit.
+infra_stats_cache_html_limit: 200
+infra_stats_cache_json_limit: 2000

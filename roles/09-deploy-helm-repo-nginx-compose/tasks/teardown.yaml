@@ -1,0 +1,73 @@
+---
+- name: Stop standalone helm-repo nginx compose stack
+  ansible.builtin.systemd:
+    name: "{{ compose_systemd_helm_repo_nginx_unit_name }}.service"
+    state: stopped
+    enabled: false
+    daemon_reload: true
+  failed_when: false
+  when: >-
+    not (
+      (helm_repo_nginx_shared_with_registry | default(true) | bool)
+      and (setup_registry_nginx | default(false) | bool)
+    )
+
+- name: Remove standalone helm-repo nginx systemd unit
+  ansible.builtin.file:
+    path: "{{ compose_systemd_unit_dir }}/{{ compose_systemd_helm_repo_nginx_unit_name }}.service"
+    state: absent
+  register: helm_repo_systemd_unit_removed
+  when: >-
+    not (
+      (helm_repo_nginx_shared_with_registry | default(true) | bool)
+      and (setup_registry_nginx | default(false) | bool)
+    )
+
+- name: Remove helm-repo nginx vhost configuration
+  ansible.builtin.file:
+    path: "{{ helm_repo_nginx_vhosts_dir }}/helm-repo-vhosts.conf"
+    state: absent
+  register: helm_repo_vhosts_removed
+
+- name: Remove helm-repo TLS renewal cron job
+  ansible.builtin.file:
+    path: /etc/cron.d/helm-repo-tls-renew
+    state: absent
+
+- name: Remove standalone helm-repo nginx configuration files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ helm_repo_nginx_config_dir }}/nginx.conf"
+    - "{{ helm_repo_nginx_compose_project_dir }}/docker-compose.yml"
+    - "{{ helm_repo_nginx_compose_project_dir }}/issue-helm-repo-tls-cert.sh"
+    - "{{ helm_repo_nginx_compose_project_dir }}/renew-helm-repo-tls-cert.sh"
+  when: >-
+    not (
+      (helm_repo_nginx_shared_with_registry | default(true) | bool)
+      and (setup_registry_nginx | default(false) | bool)
+    )
+
+- name: Reload shared registry nginx after helm-repo vhost removal
+  ansible.builtin.include_role:
+    name: 06-enable-compose-systemd
+    tasks_from: reload_registry_nginx.yaml
+  when:
+    - setup_registry_nginx | default(false) | bool
+    - helm_repo_nginx_shared_with_registry | default(true) | bool
+    - helm_repo_vhosts_removed.changed | default(false)
+
+- name: Mark registry nginx pending restart after helm-repo teardown
+  ansible.builtin.include_role:
+    name: 06-enable-compose-systemd
+    tasks_from: mark_compose_pending_restart.yaml
+  vars:
+    compose_pending_restart_units:
+      - "{{ compose_systemd_registry_nginx_unit_name }}"
+  when:
+    - setup_registry_nginx | default(false) | bool
+    - helm_repo_nginx_shared_with_registry | default(true) | bool
+    - >-
+      helm_repo_vhosts_removed.changed | default(false)
+      or helm_repo_systemd_unit_removed.changed | default(false)

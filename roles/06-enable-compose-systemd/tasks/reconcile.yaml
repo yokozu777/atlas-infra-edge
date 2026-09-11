@@ -1,0 +1,4 @@
+---
+# Legacy entrypoint name — Phase 2 slim reconcile (no full image re-pull).
+- name: Reconcile compose stacks (pending restart + ensure started)
+  ansible.builtin.import_tasks: compose_reconcile.yaml

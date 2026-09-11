@@ -1,0 +1,64 @@
+---
+nginx_cache_sync_enabled: false
+
+# push | pull
+nginx_cache_sync_direction: pull
+
+nginx_cache_sync_remote_host: ""
+nginx_cache_sync_remote_dir: /opt/infra-cache-mirror
+nginx_cache_sync_remote_user: root
+nginx_cache_sync_remote_port: 22
+
+# key | password
+nginx_cache_sync_ssh_auth: key
+nginx_cache_sync_ssh_private_key: "{{ ansible_ssh_private_key_file | default(lookup('env', 'SSH_KEY')) }}"
+nginx_cache_sync_ssh_password: ""
+
+nginx_cache_sync_pkg_repo_enabled: true
+nginx_cache_sync_helm_repo_enabled: true
+nginx_cache_sync_registry_enabled: true
+nginx_cache_sync_custom_www_enabled: true
+
+nginx_cache_sync_remote_subdir_pkg_repo: pkg-repo
+nginx_cache_sync_remote_subdir_helm_repo: helm-repo
+nginx_cache_sync_remote_subdir_helm_releases: helm-releases
+# GitHub Releases file store (rsync + nginx ownership). Catalog may override.
+helm_repo_nginx_releases_dir: /opt/helm-repo-nginx/releases
+nginx_cache_sync_remote_subdir_registry: registry
+nginx_cache_sync_remote_subdir_custom_www: custom-www
+
+nginx_cache_sync_stop_services: true
+nginx_cache_sync_rsync_compress: true
+nginx_cache_sync_rsync_extra_opts:
+  - --numeric-ids
+  - --partial
+nginx_cache_sync_min_free_gb: 5
+
+# After pull: warm pkg-repo metadata (role 08 warm_cache.yaml)
+nginx_cache_sync_warm_after_pull: true
+
+# Ownership after rsync --numeric-ids (pulled trees → nginx runtime user).
+# static    — use nginx_cache_sync_nginx_uid/gid (default; official nginx alpine = 101:101)
+# container — docker exec id from running registry-nginx (when still up)
+# image     — legacy ownership-image probe (slow; escape hatch only)
+nginx_cache_sync_ownership_resolve: static
+nginx_cache_sync_nginx_uid: 101
+nginx_cache_sync_nginx_gid: 101
+# Used only when ownership_resolve=image
+nginx_cache_sync_ownership_image: "{{ registry_nginx_image | default('nginx:1.27-alpine') }}"
+
+# Skip pull when local stamp matches remote fingerprint (pull only).
+# Product default off (always sync). Lab/CI may set true for warm re-runs.
+nginx_cache_sync_skip_if_fresh: false
+nginx_cache_sync_fresh_max_age_hours: 24
+# Host-local stamp written after a successful pull when skip_if_fresh is enabled.
+nginx_cache_sync_stamp_path: "{{ infra_bootstrap_repo_state_dir | default('/var/lib/atlas-infra') }}/cache-sync.stamp"
+# Restart intent surviving a failed sync after stop_services (cleared after restart attempt).
+nginx_cache_sync_services_hold_path: "{{ infra_bootstrap_repo_state_dir | default('/var/lib/atlas-infra') }}/cache-sync-services.held"
+
+# Parallel rsync of enabled components (+ registry). Default off until lab bench.
+# When true, jobs run in batches of parallel_jobs via async; any rc!=0 fails the play.
+nginx_cache_sync_parallel: false
+nginx_cache_sync_parallel_jobs: 4
+nginx_cache_sync_parallel_timeout_sec: 7200
+nginx_cache_sync_parallel_poll_sec: 5

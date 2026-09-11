@@ -1,0 +1,1012 @@
+###############################################################################
+# atlas-infra-edge — standalone operator surface (./run.sh)
+# -----------------------------------------------------------------------------
+# Purpose : full variable catalog (same surface as orchestrated atlas-infra-edge.yml)
+# Defaults: roles/*/defaults/main.yml still win for any key not set here
+# Docs    : README.md
+#           (orchestrated leaves: group_vars/all/atlas-infra-edge.yml)
+#
+# Secrets: see group_vars/all/atlas-infra-edge.secrets.yml (Vault-friendly).
+# Standalone alternative: EXTRA_VARS_FILE=examples/secrets.example.yml
+# 01_validate_vars rejects CHANGEME for BIND / step-ca / sync when those gates are on.
+# Workspace env: CLUSTER_WORKSPACE_ID / PARENT / ROOT (00_ensure_workspace).
+# Optional alias: k8s_cluster_domain (workspace fallback only).
+# BIND child zones: bind_zones — do not require k8s_cluster_domain.
+#
+# Standalone defaults keep feature gates off and pull modes none until you enable them.
+###############################################################################
+
+# =============================================================================
+# REQUIRED — Targeting
+# =============================================================================
+
+infra_platform_hosts: infra_platform
+
+# =============================================================================
+# REQUIRED — Identity / workspace
+# =============================================================================
+
+cluster_domain: infra.example.com
+dns_domain_suffix: example.com
+cluster_workspace_id: "{{ lookup('ansible.builtin.env', 'CLUSTER_WORKSPACE_ID') | default(cluster_domain, true) }}"
+cluster_workspace_parent: "{{ lookup('ansible.builtin.env', 'CLUSTER_WORKSPACE_PARENT') | default('./workspace', true) }}"
+cluster_workspace_root: "{{ lookup('ansible.builtin.env', 'CLUSTER_WORKSPACE_ROOT') | default(cluster_workspace_parent ~ '/' ~ cluster_workspace_id, true) }}"
+ansible_user: localuser
+dns_server_ip: "{{ groups[infra_platform_hosts] | first }}"
+
+# =============================================================================
+# OPTIONAL — Feature gates / pull modes
+# =============================================================================
+# Standalone-safe defaults: gates off, pull modes none.
+# Enable stacks you need; fill CHANGEME before secrets-backed gates.
+# none|nexus|nginx (pkg/helm); none|harbor|registry (images).
+# Derived setup_* must stay consistent with modes (01_validate_vars).
+
+setup_bind: false
+setup_ntp: false
+setup_stepca: false
+use_internal_docker_registry: none
+setup_registry: "{{ use_internal_docker_registry == 'registry' }}"
+setup_registry_nginx: "{{ use_internal_docker_registry == 'registry' }}"
+# APT/RPM nginx mirror gate (infra-local). Independent of client leaf pkg_repos.
+setup_pkg_repo_nginx: false
+setup_apt_rpm_nginx: "{{ setup_pkg_repo_nginx | bool }}"
+# Legacy label only (does not derive setup_apt_rpm_nginx). Client path uses pkg_repos.
+use_internal_rpm_apt_repo: none
+# Host foundation package drop-ins: leaf pkg_repos on node-foundation overlay.
+install_managed_pkg_repos: false
+use_internal_helm_repo: none
+setup_helm_repo_nginx: false
+setup_helm_nginx: "{{ use_internal_helm_repo == 'nginx' and setup_helm_repo_nginx }}"
+setup_custom_nginx: false
+get_snapshotter: github
+snapshotter_version: 8.6.0
+snapshotter_github_repo: https://github.com/kubernetes-csi/external-snapshotter.git
+nexus_host: nexus.example.com
+nexus_base_url: "https://{{ nexus_host }}/repository"
+harbor_host: images.example.com
+harbor_mirror_base: "https://{{ harbor_host }}/v2"
+setup_custom_content_nginx: "{{ get_snapshotter == 'internal-nginx' and setup_custom_nginx }}"
+# Static lab summary page on shared registry-nginx (stats.<dns>/stats).
+setup_infra_stats: false
+setup_compose_systemd: true
+nginx_cache_sync_enabled: false
+
+# =============================================================================
+# OPTIONAL — Site identity
+# =============================================================================
+
+timezone: UTC
+
+# =============================================================================
+# OPTIONAL — BIND — core
+# =============================================================================
+
+bind_compose_project_dir: /opt/bind-compose
+bind_config_dir: /opt/bind
+bind_zones_subdir: zones
+bind_zones_dir: "{{ bind_config_dir }}/{{ bind_zones_subdir }}"
+bind_named_conf_path: "{{ bind_config_dir }}/named.conf"
+bind_container_name: bind
+bind_hostname: "bind.{{ dns_domain_suffix }}"
+bind_image: "ubuntu/bind9:edge"
+bind_listen_ip: "{{ dns_server_ip }}"
+bind_container_timezone: "{{ timezone | default('Europe/Moscow') }}"
+bind_forwarders:
+  - 1.1.1.1
+bind_forward_policy: only
+bind_allow_query:
+  - 127.0.0.1
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+bind_allow_recursion:
+  - 127.0.0.1
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+bind_configure_infra_resolver: true
+bind_infra_resolver_nameserver: "{{ bind_listen_ip }}"
+bind_dns_algorithm: hmac-sha256
+# bind_*_tsig_secret / external_dns_*_tsig_secret → atlas-infra-edge.secrets.yml
+bind_hosts_file: "{{ provision_hosts_file }}"
+bind_soa_mname: "{{ bind_hostname }}"
+bind_soa_rname: "hostmaster.{{ bind_zones.apex.name }}"
+bind_ns_host: "{{ bind_hostname }}."
+bind_zone_ttl: 86400
+bind_zone_refresh: 3600
+bind_zone_retry: 1800
+bind_zone_expire: 604800
+bind_zone_minimum: 86400
+
+# =============================================================================
+# OPTIONAL — BIND — zones & TSIG
+# =============================================================================
+# Child FQDNs live in bind_zones — do not set k8s_cluster_domain for BIND.
+# Flat bind_*_tsig_secret placeholders (vault / EXTRA_VARS_FILE).
+
+bind_zones:
+  apex:
+    name: "{{ dns_domain_suffix }}"
+    tsig_key_name: "{{ dns_domain_suffix }}"
+    tsig_secret: "{{ provision_dns_key_secret | default(bind_apex_tsig_secret) }}"
+    update_mode: allow-update
+    inventory_a_records: true
+    static_records: []
+  k8s:
+    name: "k8s.{{ dns_domain_suffix }}"
+    tsig_key_name: "k8s.{{ dns_domain_suffix }}-key"
+    tsig_secret: "{{ external_dns_tsig_secret | default(bind_k8s_tsig_secret) }}"
+    update_mode: zonesub
+    inventory_a_records: false
+    static_records: []
+  istio:
+    name: "istio.{{ dns_domain_suffix }}"
+    tsig_key_name: "istio.{{ dns_domain_suffix }}-key"
+    tsig_secret: "{{ external_dns_istio_tsig_secret | default(bind_istio_tsig_secret) }}"
+    update_mode: zonesub
+    inventory_a_records: false
+    static_records: []
+# external_dns_tsig_secret / external_dns_istio_tsig_secret → atlas-infra-edge.secrets.yml
+
+# =============================================================================
+# OPTIONAL — BIND — apex static records
+# =============================================================================
+# Extra apex records; inventory A records also scraped from bind_hosts_file.
+
+bind_apex_static_records:
+  - name: bind
+    type: A
+    rdata: "{{ bind_listen_ip }}"
+  - name: ca
+    type: A
+    rdata: "{{ dns_server_ip }}"
+  - name: ntp
+    type: A
+    rdata: "{{ dns_server_ip }}"
+  - name: k8s
+    type: NS
+    rdata: "{{ bind_hostname }}."
+  - name: istio
+    type: NS
+    rdata: "{{ bind_hostname }}."
+bind_apex_static_records_registry:
+  - name: registry
+    type: A
+    rdata: "{{ dns_server_ip }}"
+  - name: "*.registry"
+    type: A
+    rdata: "{{ dns_server_ip }}"
+harbor_dns_ip: ""
+bind_apex_static_records_harbor:
+  - name: harbor
+    type: A
+    rdata: "{{ harbor_dns_ip }}"
+bind_apex_static_records_repo:
+  - name: repo
+    type: A
+    rdata: "{{ dns_server_ip }}"
+  - name: "*.repo"
+    type: A
+    rdata: "{{ dns_server_ip }}"
+bind_apex_static_records_helm:
+  - name: helm
+    type: A
+    rdata: "{{ dns_server_ip }}"
+  - name: "*.helm"
+    type: A
+    rdata: "{{ dns_server_ip }}"
+bind_apex_static_records_static:
+  - name: static
+    type: A
+    rdata: "{{ dns_server_ip }}"
+bind_apex_static_records_stats:
+  - name: stats
+    type: A
+    rdata: "{{ dns_server_ip }}"
+
+# =============================================================================
+# OPTIONAL — NTP
+# =============================================================================
+
+ntp_compose_project_dir: /opt/ntp-compose
+ntp_container_name: ntp
+ntp_image: "cturra/ntp:latest"
+ntp_hostname: "ntp.{{ dns_domain_suffix }}"
+ntp_listen_ip: "{{ dns_server_ip }}"
+ntp_upstream_servers:
+  - 0.pool.ntp.org
+  - 1.pool.ntp.org
+ntp_allowed_networks:
+  - 127.0.0.0/8
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+ntp_log_level: 1
+ntp_disable_host_chrony: true
+ntp_ready_timeout: 60
+ntp_ready_retries: 12
+ntp_ready_delay: 5
+ntp_waitsync_max_seconds: 30
+ntp_max_offset_seconds: 0.5
+
+# =============================================================================
+# OPTIONAL — step-ca
+# =============================================================================
+# Never leave CHANGEME when setup_stepca: true.
+
+stepca_compose_project_dir: /opt/stepca-compose
+stepca_data_dir: /opt/stepca
+stepca_container_name: stepca
+stepca_image: "smallstep/step-ca:latest"
+stepca_user: root
+stepca_listen_ip: "{{ dns_server_ip }}"
+stepca_https_port: 8443
+stepca_container_https_port: 9000
+stepca_ocsp_port: 9000
+stepca_init_name: Example Internal CA
+stepca_init_dns_names: "ca.{{ dns_domain_suffix }},localhost"
+# ACME / TLS issuance hostname for compose stacks (registry, nginx, …).
+# Distinct from node-foundation pki_ca_url (HTTPS roots.pem list for trust store).
+pki_ca_host: "ca.{{ dns_domain_suffix }}"
+stepca_init_provisioner_name: admin
+stepca_provisioned_marker: "{{ stepca_data_dir }}/config/ca.json"
+stepca_init_timeout: 120
+stepca_tls_max_cert_duration: 2160h
+stepca_tls_default_cert_duration: 2160h
+# stepca_init_password → atlas-infra-edge.secrets.yml
+
+# =============================================================================
+# OPTIONAL — Docker registry / containerd mirrors
+# =============================================================================
+
+containerd_registry_mirrors:
+  - dir_name: docker.io
+    server: "https://registry-1.docker.io"
+    mirror_path: docker-hub
+  - dir_name: registry-1.docker.io
+    server: "https://registry-1.docker.io"
+    mirror_path: docker-hub
+  - dir_name: registry.k8s.io
+    server: "https://registry.k8s.io"
+    mirror_path: k8s.io
+  - dir_name: gcr.io
+    server: "https://gcr.io"
+    mirror_path: gcr.io
+  - dir_name: mirror.gcr.io
+    server: "https://mirror.gcr.io"
+    mirror_path: mirror.gcr.io
+  - dir_name: ghcr.io
+    server: "https://ghcr.io"
+    mirror_path: ghcr.io
+  # Docker Hub vanity: dedicated pull-through to https://cr.fluentbit.io cannot do Bearer.
+  # Share the docker.io proxy (duplicate server is skipped in compose render).
+  - dir_name: cr.fluentbit.io
+    server: "https://registry-1.docker.io"
+    mirror_path: docker.io
+  - dir_name: quay.io
+    server: "https://quay.io"
+    mirror_path: quay.io
+  - dir_name: docker.elastic.co
+    server: "https://docker.elastic.co"
+    mirror_path: elastic.co
+  - dir_name: cr.yandex
+    server: "https://cr.yandex"
+    mirror_path: cr.yandex
+  - dir_name: yandex
+    server: "https://cr.yandex"
+    mirror_path: cr.yandex
+  - dir_name: public.ecr.aws
+    server: "https://public.ecr.aws"
+    mirror_path: ecr.aws
+  - dir_name: ecr-public.aws.com
+    server: "https://ecr-public.aws.com"
+    mirror_path: ecr-public.aws.com
+  - dir_name: prom
+    server: "https://prom"
+    mirror_path: docker-hub
+  - dir_name: hashicorp
+    server: "https://hashicorp"
+    mirror_path: docker-hub
+  - dir_name: jaegertracing
+    server: "https://jaegertracing"
+    mirror_path: docker-hub
+  - dir_name: graylog
+    server: "https://graylog"
+    mirror_path: docker-hub
+  - dir_name: getsentry
+    server: "https://getsentry"
+    mirror_path: docker-hub
+  - dir_name: kubevious
+    server: "https://kubevious"
+    mirror_path: docker-hub
+  - dir_name: opensearchproject
+    server: "https://opensearchproject"
+    mirror_path: docker-hub
+  - dir_name: redislabs
+    server: "https://redislabs"
+    mirror_path: docker-hub
+  - dir_name: rook
+    server: "https://rook"
+    mirror_path: docker-hub
+  # GHCR vanity: dedicated pull-through to https://reg.kyverno.io cannot do Bearer.
+  # Share the ghcr.io proxy (duplicate server is skipped in compose render).
+  - dir_name: reg.kyverno.io
+    server: "https://ghcr.io"
+    mirror_path: ghcr.io
+  - dir_name: "{{ nexus_host }}"
+    server: "https://{{ nexus_host }}"
+    direct: true
+registry_compose_project_dir: /opt/registry-compose
+registry_data_dir: /opt/registry
+registry_image: "registry:3.1.1"
+registry_listen_ip: "{{ dns_server_ip }}"
+registry_proxy_port_base: 5000
+registry_container_port: 5000
+registry_host: "registry.{{ dns_domain_suffix }}"
+registry_tls_enabled: true
+registry_tls_dir: "{{ registry_data_dir }}/certs"
+registry_tls_cert_filename: tls.crt
+registry_tls_key_filename: tls.key
+registry_tls_common_name: "{{ registry_host }}"
+registry_tls_sans:
+  - "{{ registry_host }}"
+  - "{{ registry_listen_ip }}"
+registry_tls_cert_duration: "{{ stepca_tls_max_cert_duration }}"
+registry_tls_renew_before_seconds: 604800
+registry_tls_cron_enabled: true
+registry_tls_cron_hour: 3
+registry_tls_cron_minute: 0
+registry_tls_cron_log_file: /var/log/registry-tls-renew.log
+registry_tls_cron_service_name: cron
+registry_nginx_compose_project_dir: /opt/registry-nginx-compose
+registry_nginx_config_dir: /opt/registry-nginx/conf
+registry_nginx_image: "nginx:1.27-alpine"
+registry_nginx_container_name: registry-nginx
+registry_nginx_listen_ip: "{{ dns_server_ip }}"
+registry_nginx_https_port: 443
+registry_ingress_domain: "registry.{{ dns_domain_suffix }}"
+registry_internal_network_name: registry-net
+compose_systemd_registry_unit_name: registry-compose
+compose_systemd_registry_nginx_unit_name: registry-nginx-compose
+
+# =============================================================================
+# OPTIONAL — Bootstrap — public package repos
+# =============================================================================
+
+infra_bootstrap_public_pkg_repos: true
+infra_bootstrap_repo_state_dir: /var/lib/atlas-infra
+infra_bootstrap_repo_marker: "{{ infra_bootstrap_repo_state_dir }}/infra-bootstrap-repos.done"
+infra_bootstrap_repo_backup_dir: "{{ infra_bootstrap_repo_state_dir }}/repo-backup"
+docker_apt_public_key_url_debian: "https://download.docker.com/linux/debian/gpg"
+docker_apt_public_key_url_ubuntu: "https://download.docker.com/linux/ubuntu/gpg"
+docker_apt_public_debian_base: "https://download.docker.com/linux/debian"
+docker_apt_public_ubuntu_base: "https://download.docker.com/linux/ubuntu"
+docker_dnf_public_repo_url: "https://download.docker.com/linux/centos/docker-ce.repo"
+docker_dnf_public_repo_filename: docker-ce
+
+# =============================================================================
+# OPTIONAL — Managed package repo enable flags
+# =============================================================================
+
+# --- Kubernetes / Docker CE ---
+
+enable_repo_k8s_1_36: true
+enable_repo_yum_docker_ce_stable_9: true
+enable_repo_yum_docker_ce_stable_10: true
+enable_repo_k8s_ubuntu_1_36: true
+k8s_apt_repo_version: '1.36'
+
+# --- Oracle Linux 9 ---
+
+enable_repo_OL9_baseos: true
+enable_repo_OL9_appstream: true
+enable_repo_OL9_addons: false
+enable_repo_OL9_developer: false
+enable_repo_OL9_developer_EPEL: true
+enable_repo_OL9_codeready_builder: true
+enable_repo_OL9_kvm: false
+enable_repo_OL9_MODRHCK: false
+enable_repo_OL9_oraclelinuxmanager210: false
+enable_repo_OL9_RDMA: false
+enable_repo_OL9_UEKR7: true
+enable_repo_OL9_UEKR8: true
+
+# --- Oracle Linux 10 ---
+
+enable_repo_OL10_baseos: true
+enable_repo_OL10_appstream: true
+enable_repo_OL10_addons: false
+enable_repo_OL10_developer: false
+enable_repo_OL10_developer_EPEL: true
+enable_repo_OL10_RDMA: false
+enable_repo_OL10_UEKR8: true
+enable_repo_OL10_builder: false
+
+# --- Debian ---
+
+enable_repo_debian_main: true
+enable_repo_debian_security: true
+enable_repo_debian_non_free: false
+enable_repo_debian_containerd: true
+
+# --- Ubuntu ---
+
+enable_repo_ubuntu: true
+enable_repo_ubuntu_containerd: true
+
+# --- PostgreSQL PGDG (nginx warm + client catalog parity) ---
+
+enable_repo_pgdg_apt: true
+enable_repo_pgdg_yum: true
+# Legacy alias (warm_cache still honours this for both PGDG slugs)
+enable_repo_pgdg: true
+
+# --- GitLab Runner (nginx warm; client = atlas-gitlab-runner role) ---
+
+enable_repo_gitlab_runner_ubuntu: true
+enable_repo_gitlab_runner_debian: true
+enable_repo_gitlab_runner_el: true
+
+# =============================================================================
+# OPTIONAL — APT/RPM nginx cache
+# =============================================================================
+
+pkg_repo_nginx_compose_project_dir: /opt/pkg-repo-nginx-compose
+pkg_repo_nginx_config_dir: /opt/pkg-repo-nginx/conf
+pkg_repo_nginx_vhosts_dir: "{{ pkg_repo_nginx_config_dir }}/vhosts"
+pkg_repo_nginx_cache_dir: /opt/pkg-repo-nginx/cache
+pkg_repo_nginx_image: "nginx:1.27-alpine"
+pkg_repo_nginx_container_name: pkg-repo-nginx
+pkg_repo_nginx_listen_ip: "{{ dns_server_ip }}"
+pkg_repo_nginx_https_port: 443
+pkg_repo_nginx_ingress_domain: "repo.{{ dns_domain_suffix }}"
+pkg_repo_nginx_host: "repo.{{ dns_domain_suffix }}"
+pkg_repo_nginx_cache_max_size: 20g
+pkg_repo_nginx_cache_metadata_max_size: 2g
+pkg_repo_nginx_cache_blobs_max_size: 18g
+pkg_repo_nginx_cache_valid_success: 30d
+pkg_repo_nginx_cache_valid_metadata: 1m
+pkg_repo_nginx_cache_valid_metadata_not_found: 1m
+pkg_repo_nginx_cache_valid_not_found: 1m
+pkg_repo_nginx_cache_warm_enabled: true
+pkg_repo_nginx_cache_warm_mode: light
+pkg_repo_nginx_cache_warm_debian_suite: trixie
+pkg_repo_nginx_cache_warm_ubuntu_suite: resolute
+# PGDG yum warm paths under pgdg-yum upstream root
+pkg_repo_nginx_cache_warm_pgsql_version: "{{ pgsql_version | default('18') }}"
+pkg_repo_nginx_cache_warm_pgdg_rhel_majors:
+  - 9
+  - 10
+pkg_repo_nginx_cache_warm_timeout: 300
+pkg_repo_nginx_cache_warm_wait_retries: 60
+pkg_repo_nginx_cache_warm_wait_delay: 5
+pkg_repo_nginx_cache_warm_curl_connect_timeout: 5
+pkg_repo_nginx_cache_warm_curl_max_time: 60
+pkg_repo_nginx_shared_with_registry: true
+pkg_repo_tls_enabled: true
+pkg_repo_tls_dir: /opt/pkg-repo-nginx/certs
+pkg_repo_tls_cert_filename: tls.crt
+pkg_repo_tls_key_filename: tls.key
+pkg_repo_tls_common_name: "{{ pkg_repo_nginx_host }}"
+pkg_repo_tls_sans:
+  - "{{ pkg_repo_nginx_host }}"
+  - "{{ pkg_repo_nginx_listen_ip }}"
+pkg_repo_tls_cert_duration: "{{ stepca_tls_max_cert_duration }}"
+pkg_repo_tls_renew_before_seconds: 604800
+pkg_repo_tls_cron_enabled: true
+pkg_repo_tls_cron_hour: 3
+pkg_repo_tls_cron_minute: 15
+pkg_repo_tls_cron_log_file: /var/log/pkg-repo-tls-renew.log
+pkg_repo_tls_cron_service_name: cron
+compose_systemd_pkg_repo_nginx_unit_name: pkg-repo-nginx-compose
+pkg_repo_upstreams:
+  - slug: debian-main
+    upstream_url: "https://deb.debian.org/debian"
+    upstream_host: deb.debian.org
+  - slug: debian-security
+    upstream_url: "https://deb.debian.org/debian-security"
+    upstream_host: deb.debian.org
+  - slug: debian-non-free
+    upstream_url: "https://deb.debian.org/debian"
+    upstream_host: deb.debian.org
+  - slug: ubuntu
+    upstream_url: "https://archive.ubuntu.com/ubuntu"
+    upstream_host: archive.ubuntu.com
+  - slug: debian-containerd
+    upstream_url: "https://download.docker.com/linux/debian"
+    upstream_host: download.docker.com
+  - slug: ubuntu-containerd
+    upstream_url: "https://download.docker.com/linux/ubuntu"
+    upstream_host: download.docker.com
+  - slug: pgdg-apt
+    upstream_url: "https://apt.postgresql.org/pub/repos/apt"
+    upstream_host: apt.postgresql.org
+  - slug: pgdg-yum
+    upstream_url: "https://download.postgresql.org/pub/repos/yum"
+    upstream_host: download.postgresql.org
+  - slug: "k8s-ubuntu-{{ k8s_apt_repo_version }}"
+    upstream_url: "https://pkgs.k8s.io/core:/stable:/v{{ k8s_apt_repo_version }}/deb/"
+    upstream_host: pkgs.k8s.io
+  - slug: "k8s-{{ k8s_apt_repo_version }}"
+    upstream_url: "https://pkgs.k8s.io/core:/stable:/v{{ k8s_apt_repo_version }}/rpm/"
+    upstream_host: pkgs.k8s.io
+  - slug: yum_docker-ce-stable-9
+    upstream_url: "https://download.docker.com/linux/centos/9/x86_64/stable"
+    upstream_host: download.docker.com
+  - slug: yum_docker-ce-stable-10
+    upstream_url: "https://download.docker.com/linux/centos/10/x86_64/stable"
+    upstream_host: download.docker.com
+  - slug: gitlab-runner-ubuntu
+    upstream_url: "https://packages.gitlab.com/runner/gitlab-runner/ubuntu"
+    upstream_host: packages.gitlab.com
+  - slug: gitlab-runner-debian
+    upstream_url: "https://packages.gitlab.com/runner/gitlab-runner/debian"
+    upstream_host: packages.gitlab.com
+  - slug: gitlab-runner-el
+    upstream_url: "https://packages.gitlab.com/runner/gitlab-runner/el/9/x86_64"
+    upstream_host: packages.gitlab.com
+  - slug: OL9_baseos
+    upstream_url: "https://yum.oracle.com/repo/OracleLinux/OL9/baseos/latest/x86_64/"
+    upstream_host: yum.oracle.com
+  - slug: OL9_appstream
+    upstream_url: "https://yum.oracle.com/repo/OracleLinux/OL9/appstream/x86_64/"
+    upstream_host: yum.oracle.com
+  - slug: OL9_addons
+    upstream_url: "https://yum.oracle.com/repo/OracleLinux/OL9/addons/x86_64/"
+    upstream_host: yum.oracle.com
+  - slug: OL9_developer
+    upstream_url: "https://yum.oracle.com/repo/OracleLinux/OL9/developer/x86_64/"
+    upstream_host: yum.oracle.com
+  - slug: OL9_developer_EPEL
+    upstream_url: "https://yum.oracle.com/repo/OracleLinux/OL9/developer/EPEL/x86_64/"
+    upstream_host: yum.oracle.com
+  - slug: OL9_codeready_builder
+    upstream_url: "https://yum.oracle.com/repo/OracleLinux/OL9/codeready/builder/x86_64/"
+    upstream_host: yum.oracle.com
+  - slug: OL9_kvm
+    upstream_url: "https://yum.oracle.com/repo/OracleLinux/OL9/kvm/utils/x86_64/"
+    upstream_host: yum.oracle.com
+  - slug: OL9_MODRHCK
+    upstream_url: "https://yum.oracle.com/repo/OracleLinux/OL9/MODRHCK/x86_64/"
+    upstream_host: yum.oracle.com
+  - slug: OL9_oraclelinuxmanager210
+    upstream_url: "https://yum.oracle.com/repo/OracleLinux/OL9/oraclelinuxmanager210/client/x86_64/"
+    upstream_host: yum.oracle.com
+  - slug: OL9_RDMA
+    upstream_url: "https://yum.oracle.com/repo/OracleLinux/OL9/RDMA/x86_64/"
+    upstream_host: yum.oracle.com
+  - slug: OL9_UEKR7
+    upstream_url: "https://yum.oracle.com/repo/OracleLinux/OL9/UEKR7/x86_64/"
+    upstream_host: yum.oracle.com
+  - slug: OL9_UEKR8
+    upstream_url: "https://yum.oracle.com/repo/OracleLinux/OL9/UEKR8/x86_64/"
+    upstream_host: yum.oracle.com
+  - slug: OL10_baseos
+    upstream_url: "https://yum.oracle.com/repo/OracleLinux/OL10/baseos/latest/x86_64/"
+    upstream_host: yum.oracle.com
+  - slug: OL10_appstream
+    upstream_url: "https://yum.oracle.com/repo/OracleLinux/OL10/appstream/x86_64/"
+    upstream_host: yum.oracle.com
+  - slug: OL10_addons
+    upstream_url: "https://yum.oracle.com/repo/OracleLinux/OL10/addons/x86_64/"
+    upstream_host: yum.oracle.com
+  - slug: OL10_developer
+    upstream_url: "https://yum.oracle.com/repo/OracleLinux/OL10/developer/x86_64/"
+    upstream_host: yum.oracle.com
+  - slug: OL10_developer_EPEL
+    upstream_url: "https://yum.oracle.com/repo/OracleLinux/OL10/0/developer/EPEL/x86_64/"
+    upstream_host: yum.oracle.com
+  - slug: OL10_RDMA
+    upstream_url: "https://yum.oracle.com/repo/OracleLinux/OL10/RDMA/x86_64/"
+    upstream_host: yum.oracle.com
+  - slug: OL10_UEKR8
+    upstream_url: "https://yum.oracle.com/repo/OracleLinux/OL10/UEKR8/x86_64/"
+    upstream_host: yum.oracle.com
+  - slug: OL10_builder
+    upstream_url: "https://yum.oracle.com/repo/OracleLinux/OL10/distro/builder/x86_64/"
+    upstream_host: yum.oracle.com
+
+# =============================================================================
+# OPTIONAL — Helm nginx cache
+# =============================================================================
+# SoT public upstreams + nexus_path; nginx host <name>.helm.<dns_domain_suffix>.
+
+helm_repo_upstreams:
+  - name: oauth2-proxy
+    nexus_path: oauth2-proxy
+    upstream_url: "https://oauth2-proxy.github.io/manifests"
+    upstream_host: oauth2-proxy.github.io
+  - name: falcosecurity
+    nexus_path: falco
+    upstream_url: "https://falcosecurity.github.io/charts"
+    upstream_host: falcosecurity.github.io
+  - name: projectcalico
+    nexus_path: calico
+    upstream_url: "https://docs.tigera.io/calico/charts"
+    upstream_host: docs.tigera.io
+    chart_hosts:
+      - github.com
+  - name: metallb
+    nexus_path: metallb
+    upstream_url: "https://metallb.github.io/metallb"
+    upstream_host: metallb.github.io
+  - name: prometheus-community
+    nexus_path: prometheus-community
+    upstream_url: "https://prometheus-community.github.io/helm-charts"
+    upstream_host: prometheus-community.github.io
+  - name: ceph-csi-operator
+    nexus_path: rook-ceph-csi-operator
+    upstream_url: "https://ceph.github.io/ceph-csi-operator"
+    upstream_host: ceph.github.io
+  - name: rook-release
+    nexus_path: rook-release
+    upstream_url: "https://charts.rook.io/release"
+    upstream_host: charts.rook.io
+  - name: fluent
+    nexus_path: fluent
+    upstream_url: "https://fluent.github.io/helm-charts"
+    upstream_host: fluent.github.io
+  - name: elastic
+    nexus_path: helm.elastic.local/
+    upstream_url: "https://helm.elastic.co"
+    upstream_host: helm.elastic.co
+  - name: hashicorp
+    nexus_path: helm.releases.hashicorp.com/
+    upstream_url: "https://helm.releases.hashicorp.com"
+    upstream_host: helm.releases.hashicorp.com
+  - name: istio
+    nexus_path: istio/
+    upstream_url: "https://istio-release.storage.googleapis.com/charts"
+    upstream_host: istio-release.storage.googleapis.com
+  - name: kiali
+    nexus_path: kiali/
+    upstream_url: "https://kiali.org/helm-charts"
+    upstream_host: kiali.org
+  - name: argo
+    nexus_path: argo/
+    upstream_url: "https://argoproj.github.io/argo-helm"
+    upstream_host: argoproj.github.io
+  - name: codecentric
+    nexus_path: codecentric/
+    upstream_url: "https://codecentric.github.io/helm-charts"
+    upstream_host: codecentric.github.io
+  - name: sentry
+    nexus_path: sentry/
+    upstream_url: "https://sentry-kubernetes.github.io/charts"
+    upstream_host: sentry-kubernetes.github.io
+  - name: jetstack
+    nexus_path: jetstack/
+    upstream_url: "https://charts.jetstack.io"
+    upstream_host: charts.jetstack.io
+  - name: kong-z
+    nexus_path: kong-z/
+    upstream_url: "https://charts.konghq.com"
+    upstream_host: charts.konghq.com
+    chart_hosts:
+      - github.com
+  - name: metrics-server
+    nexus_path: metrics-server/
+    upstream_url: "https://kubernetes-sigs.github.io/metrics-server"
+    upstream_host: kubernetes-sigs.github.io
+  - name: aquasecurity
+    nexus_path: aquasecurity/
+    upstream_url: "https://aquasecurity.github.io/helm-charts"
+    upstream_host: aquasecurity.github.io
+  - name: kubecost
+    nexus_path: kubecost/
+    upstream_url: "https://kubecost.github.io/cost-analyzer"
+    upstream_host: kubecost.github.io
+  - name: opencost
+    nexus_path: opencost/
+    upstream_url: "https://opencost.github.io/opencost-helm-chart"
+    upstream_host: opencost.github.io
+  - name: kafka-ui
+    nexus_path: kafka-ui/
+    upstream_url: "https://provectus.github.io/kafka-ui-charts"
+    upstream_host: provectus.github.io
+  - name: chaos-mesh
+    nexus_path: chaos-mesh/
+    upstream_url: "https://charts.chaos-mesh.org"
+    upstream_host: charts.chaos-mesh.org
+  - name: kubevious
+    nexus_path: kubevious/
+    upstream_url: "https://helm.kubevious.io"
+    upstream_host: helm.kubevious.io
+  - name: external-secrets
+    nexus_path: external-secrets/
+    upstream_url: "https://external-secrets.io"
+    upstream_host: external-secrets.io
+    chart_hosts:
+      - github.com
+  - name: external-dns
+    nexus_path: external-dns/
+    upstream_url: "https://kubernetes-sigs.github.io/external-dns"
+    upstream_host: kubernetes-sigs.github.io
+  - name: jaegertracing
+    nexus_path: jaegertracing/
+    upstream_url: "https://jaegertracing.github.io/helm-charts"
+    upstream_host: jaegertracing.github.io
+  - name: open-telemetry
+    nexus_path: open-telemetry/
+    upstream_url: "https://open-telemetry.github.io/opentelemetry-helm-charts"
+    upstream_host: open-telemetry.github.io
+  - name: cnpg
+    nexus_path: cnpg/
+    upstream_url: "https://cloudnative-pg.io/charts"
+    upstream_host: cloudnative-pg.io
+    chart_hosts:
+      - github.com
+  - name: headlamp
+    nexus_path: headlamp/
+    upstream_url: "https://kubernetes-sigs.github.io/headlamp/"
+    upstream_host: kubernetes-sigs.github.io
+  - name: thanos-community
+    nexus_path: thanos-community
+    upstream_url: "https://thanos-community.github.io/helm-charts"
+    upstream_host: thanos-community.github.io
+  - name: kyverno
+    nexus_path: kyverno/
+    upstream_url: "https://kyverno.github.io/kyverno/"
+    upstream_host: kyverno.github.io
+  - name: policy-reporter
+    nexus_path: policy-reporter/
+    upstream_url: "https://kyverno.github.io/policy-reporter"
+    upstream_host: kyverno.github.io
+helm_repo_nginx_compose_project_dir: /opt/helm-repo-nginx-compose
+helm_repo_nginx_config_dir: /opt/helm-repo-nginx/conf
+helm_repo_nginx_vhosts_dir: "{{ helm_repo_nginx_config_dir }}/vhosts"
+helm_repo_nginx_cache_dir: /opt/helm-repo-nginx/cache
+# GitHub Releases file store for try_files (not nginx proxy_cache).
+helm_repo_nginx_releases_dir: /opt/helm-repo-nginx/releases
+helm_repo_nginx_image: "nginx:1.27-alpine"
+helm_repo_nginx_container_name: helm-repo-nginx
+helm_repo_nginx_listen_ip: "{{ dns_server_ip }}"
+helm_repo_nginx_https_port: 443
+helm_repo_nginx_ingress_domain: "helm.{{ dns_domain_suffix }}"
+helm_repo_nginx_host: "helm.{{ dns_domain_suffix }}"
+helm_repo_nginx_raw_host: "raw.{{ helm_repo_nginx_ingress_domain }}"
+helm_repo_nginx_releases_host: "releases.{{ helm_repo_nginx_ingress_domain }}"
+helm_repo_nginx_cache_max_size: 10g
+helm_repo_nginx_cache_valid_charts: 30d
+helm_repo_nginx_cache_valid_not_found: 1m
+helm_repo_nginx_cache_valid_index: 24h
+helm_repo_nginx_cache_valid_raw: 24h
+helm_repo_nginx_cache_valid_gnet: 30d
+helm_repo_nginx_index_origin_port: 18080
+# Allowlisted GitHub repo prefixes for Grafana JSON (32_prometheus source=infra).
+helm_repo_nginx_raw_github_allowlist:
+  - istio/istio
+  - ceph/ceph
+  - envoyproxy/gateway
+  - thanos-io/thanos
+  - falcosecurity/charts
+  - cloudnative-pg/grafana-dashboards
+  - keycloak/keycloak-grafana-dashboard
+  - argoproj/argo-cd
+  - argoproj/argo-rollouts
+  - external-secrets/external-secrets
+  - jaegertracing/jaeger
+  - projectcalico/calico
+# grafana.com gnetId dashboards (same raw.helm host, path /api/dashboards/{id}/...).
+helm_repo_nginx_gnet_allowlist:
+  - 3244
+  - 12175
+  - 20162
+  - 12904
+  - 18855
+  - 20340
+  - 14191
+  - 7587
+  - 13396
+  - 15038
+  - 15918
+  - 15983
+  - 17813
+  - 16337
+  - 22208
+# GitHub Releases CLI binaries (98_debug_tooling source=infra; 82_pinniped CLI).
+helm_repo_nginx_releases_github_allowlist:
+  - projectcalico/calico/releases/download
+  - istio/istio/releases/download
+  - etcd-io/etcd/releases/download
+  - vmware/pinniped/releases/download
+# Explicit github.com paths to curl -L into helm_repo_nginx_releases_dir (empty in product).
+helm_repo_releases_warm_specs: []
+helm_repo_nginx_shared_with_registry: true
+helm_repo_tls_enabled: true
+helm_repo_tls_dir: /opt/helm-repo-nginx/certs
+helm_repo_tls_cert_filename: tls.crt
+helm_repo_tls_key_filename: tls.key
+helm_repo_tls_common_name: "{{ helm_repo_nginx_host }}"
+helm_repo_tls_sans:
+  - "{{ helm_repo_nginx_host }}"
+  - "{{ helm_repo_nginx_listen_ip }}"
+helm_repo_tls_cert_duration: "{{ stepca_tls_max_cert_duration }}"
+helm_repo_tls_renew_before_seconds: 604800
+helm_repo_tls_cron_enabled: true
+helm_repo_tls_cron_hour: 3
+helm_repo_tls_cron_minute: 30
+helm_repo_tls_cron_log_file: /var/log/helm-repo-tls-renew.log
+helm_repo_tls_cron_service_name: cron
+compose_systemd_helm_repo_nginx_unit_name: helm-repo-nginx-compose
+
+# =============================================================================
+# OPTIONAL — Custom static nginx
+# =============================================================================
+
+custom_nginx_compose_project_dir: /opt/custom-nginx-compose
+custom_nginx_config_dir: /opt/custom-nginx/conf
+custom_nginx_vhosts_dir: "{{ custom_nginx_config_dir }}/vhosts"
+custom_nginx_www_dir: /opt/custom-nginx/www
+custom_nginx_image: "nginx:1.27-alpine"
+custom_nginx_container_name: custom-nginx
+custom_nginx_listen_ip: "{{ dns_server_ip }}"
+custom_nginx_https_port: 443
+custom_nginx_ingress_domain: "static.{{ dns_domain_suffix }}"
+custom_nginx_host: "static.{{ dns_domain_suffix }}"
+custom_nginx_shared_with_registry: true
+custom_nginx_tls_enabled: true
+custom_nginx_tls_dir: /opt/custom-nginx/certs
+custom_nginx_tls_cert_filename: tls.crt
+custom_nginx_tls_key_filename: tls.key
+custom_nginx_tls_common_name: "{{ custom_nginx_host }}"
+custom_nginx_tls_sans:
+  - "{{ custom_nginx_host }}"
+  - "{{ custom_nginx_listen_ip }}"
+custom_nginx_tls_cert_duration: "{{ stepca_tls_max_cert_duration }}"
+custom_nginx_tls_renew_before_seconds: 604800
+custom_nginx_tls_cron_enabled: true
+custom_nginx_tls_cron_hour: 3
+custom_nginx_tls_cron_minute: 45
+custom_nginx_tls_cron_log_file: /var/log/custom-nginx-tls-renew.log
+custom_nginx_tls_cron_service_name: cron
+# Baked when get_snapshotter=internal-nginx (role 10 clones + tar.gz on static.*).
+custom_nginx_content:
+  - name: external-snapshotter
+    source_repo: "{{ snapshotter_github_repo }}"
+    version: "{{ snapshotter_version }}"
+    sync_paths:
+      - client
+      - deploy/kubernetes
+    dest_subdir: "external-snapshotter/v{{ snapshotter_version }}"
+compose_systemd_custom_nginx_unit_name: custom-nginx-compose
+
+# =============================================================================
+# OPTIONAL — Infra stats page (shared registry-nginx)
+# =============================================================================
+
+infra_stats_compose_project_dir: /opt/infra-stats-compose
+infra_stats_config_dir: /opt/infra-stats/conf
+infra_stats_vhosts_dir: "{{ infra_stats_config_dir }}/vhosts"
+infra_stats_html_dir: /opt/infra-stats/html
+infra_stats_scrape_dir: /opt/infra-stats/scrape
+infra_stats_html_container_path: /var/www/infra-stats
+infra_stats_image: "nginx:1.27-alpine"
+infra_stats_hostname: "stats.{{ dns_domain_suffix }}"
+infra_stats_path: /stats
+infra_stats_shared_with_registry: true
+infra_stats_tls_enabled: true
+infra_stats_tls_dir: /opt/infra-stats/certs
+infra_stats_tls_cert_filename: tls.crt
+infra_stats_tls_key_filename: tls.key
+infra_stats_tls_common_name: "{{ infra_stats_hostname }}"
+infra_stats_tls_sans:
+  - "{{ infra_stats_hostname }}"
+  - "{{ dns_server_ip }}"
+infra_stats_tls_cert_duration: "{{ stepca_tls_max_cert_duration }}"
+infra_stats_tls_renew_before_seconds: 604800
+infra_stats_tls_cron_enabled: true
+infra_stats_tls_cron_hour: 4
+infra_stats_tls_cron_minute: 5
+infra_stats_tls_cron_log_file: /var/log/infra-stats-tls-renew.log
+infra_stats_tls_cron_service_name: cron
+# Periodic scrape+render (host refresh script); independent of TLS renew cron.
+infra_stats_refresh_cron_enabled: true
+infra_stats_refresh_cron_minute: "*/10"
+infra_stats_refresh_cron_hour: "*"
+infra_stats_refresh_cron_dom: "*"
+infra_stats_refresh_cron_month: "*"
+infra_stats_refresh_cron_dow: "*"
+infra_stats_refresh_cron_log_file: /var/log/infra-stats-refresh.log
+compose_systemd_infra_stats_unit_name: infra-stats-compose
+
+# =============================================================================
+# OPTIONAL — Infra cache sync
+# =============================================================================
+# Enable with nginx_cache_sync_enabled: true; set peer host/user.
+# nginx_cache_sync_ssh_password → atlas-infra-edge.secrets.yml (when ssh_auth=password).
+
+nginx_cache_sync_direction: pull
+nginx_cache_sync_remote_host: ""
+nginx_cache_sync_remote_port: 22
+nginx_cache_sync_remote_dir: /home/uploader/infra-cache-mirror
+nginx_cache_sync_remote_user: root
+nginx_cache_sync_ssh_auth: key
+nginx_cache_sync_ownership_resolve: static
+nginx_cache_sync_nginx_uid: 101
+nginx_cache_sync_nginx_gid: 101
+nginx_cache_sync_ssh_private_key: "{{ ansible_ssh_private_key_file | default(lookup('env', 'SSH_KEY')) }}"
+nginx_cache_sync_pkg_repo_enabled: true
+nginx_cache_sync_helm_repo_enabled: true
+nginx_cache_sync_registry_enabled: true
+nginx_cache_sync_custom_www_enabled: true
+nginx_cache_sync_stop_services: true
+nginx_cache_sync_rsync_compress: true
+nginx_cache_sync_min_free_gb: 5
+nginx_cache_sync_warm_after_pull: true
+# Skip rsync when local mirror is younger than max age (role 11-sync-infra-cache).
+nginx_cache_sync_skip_if_fresh: false
+nginx_cache_sync_fresh_max_age_hours: 24
+
+# =============================================================================
+# OPTIONAL — Infra cache OCI seed (role 14-infra-cache-seed)
+# =============================================================================
+# Two independent layers. XOR with nginx_cache_sync_enabled on LOAD
+# (01_validate_vars fails if both load and rsync are on).
+# Publish packs host bind-mounts into a busybox image; load docker-pulls it
+# and copies selected trees onto /opt before compose_start_registry.
+# Seed registry must be EXTERNAL (reachable after core, before local Harbor).
+# Robot creds → atlas-infra-edge.secrets.yml (never in this catalog).
+# Tags must be immutable (not latest). TLS certs/ are never packed.
+# Load skip compares pulled RepoDigest + non-empty dest trees (not tag).
+# Publish is opt-in (--tags 14_infra_cache_seed_publish), not a default play slot.
+# Builder busybox:1.36 must exist on the donor (pull or preload); site may pin a digest.
+
+infra_cache_seed_publish_enabled: false
+infra_cache_seed_publish_image: ""
+infra_cache_seed_publish_tag: ""
+infra_cache_seed_publish_include:
+  registry: true
+  helm_repo: true
+  pkg_repo: true
+  custom_www: true
+
+infra_cache_seed_load_enabled: false
+infra_cache_seed_load_image: ""
+infra_cache_seed_load_tag: ""
+infra_cache_seed_load_include:
+  registry: true
+  helm_repo: true
+  pkg_repo: true
+  custom_www: true
+
+infra_cache_seed_builder_image: busybox:1.36
+infra_cache_seed_publish_timeout_sec: 14400
+infra_cache_seed_load_timeout_sec: 7200
+infra_cache_seed_min_free_gb: 5
+infra_cache_seed_stop_services: true
+infra_cache_seed_load_skip_if_same_digest: true
+infra_cache_seed_load_stamp_path: "{{ infra_bootstrap_repo_state_dir | default('/var/lib/atlas-infra') }}/cache-seed.stamp"
+infra_cache_seed_nginx_uid: 101
+infra_cache_seed_nginx_gid: 101
+# Docker certs.d CA for the seed registry (login/pull/push). Off: public CA / OS trust.
+# XOR src vs dir when enabled (URL/host path vs controller playbook_dir folder).
+infra_cache_seed_registry_tls_ca_enabled: false
+infra_cache_seed_registry_tls_ca_src: ""
+infra_cache_seed_registry_tls_ca_dir: ""
+infra_cache_seed_registry_tls_ca_validate_certs: false
+
+# =============================================================================
+# OPTIONAL — Compose systemd units
+# =============================================================================
+
+compose_systemd_unit_dir: /etc/systemd/system
+compose_systemd_bind_unit_name: bind-compose
+compose_systemd_ntp_unit_name: ntp-compose
+compose_systemd_stepca_unit_name: stepca-compose
+
+# =============================================================================
+# Deep knobs / compose catalog pointers
+# =============================================================================
+# Role defaults remain authoritative for any unset key.
+# Compose stack catalog (data-only SoT):
+# → roles/06-enable-compose-systemd/defaults/main.yml → infra_compose_stacks
+# → roles/06-enable-compose-systemd/README.md
+# → roles/03-deploy-bind-compose/defaults/main.yml
+# → roles/04-deploy-stepca-compose/defaults/main.yml
+# → roles/05-deploy-registry-compose/defaults/main.yml
+# → roles/07–10 *-nginx-compose/defaults/main.yml
+# → roles/11-sync-infra-cache/defaults/main.yml
+# → roles/12-deploy-ntp-compose/defaults/main.yml
+# → roles/14-infra-cache-seed/defaults/main.yml

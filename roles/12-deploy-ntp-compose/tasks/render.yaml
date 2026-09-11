@@ -1,0 +1,35 @@
+---
+# Phase 1 render: compose files + mark_pending.
+# Host chrony stop / port assert / pull / start / waitsync stay in main cold-path / post_start.
+
+- name: Resolve host chrony systemd unit for NTP port conflict handling
+  ansible.builtin.set_fact:
+    ntp_host_chrony_unit: >-
+      {{
+        ntp_host_chrony_unit_override | default('')
+        if (ntp_host_chrony_unit_override | default('') | length > 0)
+        else ('chrony' if ansible_facts['os_family'] == 'Debian' else 'chronyd')
+      }}
+
+- name: Ensure NTP compose project directory exists
+  ansible.builtin.file:
+    path: "{{ ntp_compose_project_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Deploy NTP docker compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ ntp_compose_project_dir }}/docker-compose.yml"
+    mode: "0644"
+  register: ntp_compose_deployed
+
+- name: Mark NTP stack pending restart after configuration change
+  ansible.builtin.include_role:
+    name: 06-enable-compose-systemd
+    tasks_from: mark_compose_pending_restart.yaml
+  vars:
+    compose_pending_restart_units:
+      - "{{ compose_systemd_ntp_unit_name }}"
+  when: ntp_compose_deployed.changed | default(false)
+

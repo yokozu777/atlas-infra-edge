@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+CERT="{{ registry_tls_dir }}/{{ registry_tls_cert_filename }}"
+RENEW_BEFORE="{{ registry_tls_renew_before_seconds | int }}"
+ISSUE_SCRIPT="{{ registry_compose_project_dir }}/issue-registry-tls-cert.sh"
+REGISTRY_UNIT="{{ compose_systemd_registry_unit_name }}.service"
+NGINX_UNIT="{{ compose_systemd_registry_nginx_unit_name }}.service"
+
+need_renew=0
+
+if [ ! -f "$CERT" ]; then
+  need_renew=1
+elif ! openssl x509 -checkend "$RENEW_BEFORE" -noout -in "$CERT" 2>/dev/null; then
+  need_renew=1
+fi
+
+if [ "$need_renew" -eq 0 ]; then
+  exit 0
+fi
+
+"$ISSUE_SCRIPT"
+systemctl restart "$REGISTRY_UNIT"
+{% if setup_registry_nginx | default(false) | bool %}
+systemctl restart "$NGINX_UNIT"
+{% endif %}

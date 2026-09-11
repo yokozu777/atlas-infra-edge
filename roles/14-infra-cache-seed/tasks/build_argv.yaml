@@ -1,0 +1,25 @@
+---
+- name: Reset infra cache seed BuildKit argv
+  ansible.builtin.set_fact:
+    infra_cache_seed_build_argv:
+      - docker
+      - build
+      - -f
+      - "{{ infra_cache_seed_work_dir }}/Dockerfile"
+      - -t
+      - "{{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}"
+
+- name: Append BuildKit additional contexts for enabled seed components
+  ansible.builtin.set_fact:
+    infra_cache_seed_build_argv: >-
+      {{
+        infra_cache_seed_build_argv
+        + ['--build-context', item.name ~ '=' ~ item.host_dir]
+      }}
+  loop: "{{ infra_cache_seed_components | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Append BuildKit build context directory
+  ansible.builtin.set_fact:
+    infra_cache_seed_build_argv: "{{ infra_cache_seed_build_argv + [infra_cache_seed_work_dir] }}"

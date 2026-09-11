@@ -1,0 +1,202 @@
+---
+# Phase 1 render: TLS scripts/vhosts/standalone compose + mark_pending (+ warm pending).
+# TLS cert issue needs provisioned step-ca — deferred to pre_start on cold path.
+
+- name: Require step-ca when pkg-repo TLS is enabled
+  ansible.builtin.assert:
+    that:
+      - setup_stepca | default(false) | bool
+    fail_msg: pkg_repo_tls_enabled requires setup_stepca=true.
+  when: pkg_repo_tls_enabled | default(false) | bool
+
+- name: Check step-ca provision state for pkg-repo TLS
+  ansible.builtin.stat:
+    path: "{{ stepca_provisioned_marker }}"
+  register: stepca_provisioned_for_pkg_repo_tls
+  when: pkg_repo_tls_enabled | default(false) | bool
+
+- name: Defer pkg-repo TLS cert issue until step-ca is provisioned
+  ansible.builtin.debug:
+    msg: >-
+      step-ca not provisioned yet (missing {{ stepca_provisioned_marker }});
+      deferring pkg-repo TLS issue to compose_start_registry pre_start.
+  when:
+    - pkg_repo_tls_enabled | default(false) | bool
+    - not (stepca_provisioned_for_pkg_repo_tls.stat.exists | default(false))
+
+- name: Build pkg repo proxy upstreams from pkg_repo_upstreams
+  ansible.builtin.set_fact:
+    pkg_repo_proxy_upstreams: >-
+      {{
+        pkg_repo_proxy_upstreams | default([])
+        + [upstream | combine({
+          'proxy_hostname': upstream.slug | pkg_repo_proxy_hostname(pkg_repo_nginx_ingress_domain),
+          'proxy_origin': upstream.upstream_url | pkg_repo_nginx_origin,
+          'proxy_path_prefix': upstream.upstream_url | pkg_repo_nginx_path_prefix
+        })]
+      }}
+  loop: "{{ pkg_repo_upstreams }}"
+  loop_control:
+    loop_var: upstream
+
+- name: Ensure pkg-repo nginx config directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ pkg_repo_nginx_config_dir }}"
+    - "{{ pkg_repo_nginx_vhosts_dir }}"
+    - "{{ pkg_repo_nginx_cache_dir }}"
+    - "{{ pkg_repo_nginx_cache_dir }}/metadata"
+    - "{{ pkg_repo_nginx_cache_dir }}/blobs"
+    - "{{ pkg_repo_nginx_compose_project_dir }}"
+
+- name: Ensure pkg-repo TLS directory exists
+  ansible.builtin.file:
+    path: "{{ pkg_repo_tls_dir }}"
+    state: directory
+    mode: "0755"
+  when: pkg_repo_tls_enabled | default(false) | bool
+
+- name: Deploy pkg-repo TLS certificate issuance script
+  ansible.builtin.template:
+    src: issue-pkg-repo-tls-cert.sh.j2
+    dest: "{{ pkg_repo_nginx_compose_project_dir }}/issue-pkg-repo-tls-cert.sh"
+    mode: "0700"
+  register: pkg_repo_issue_script_deployed
+  when: pkg_repo_tls_enabled | default(false) | bool
+
+- name: Install cron package for pkg-repo TLS renewal (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name: cron
+    state: present
+  when:
+    - pkg_repo_tls_enabled | default(false) | bool
+    - pkg_repo_tls_cron_enabled | default(false) | bool
+    - ansible_facts['os_family'] == 'Debian'
+
+- name: Install cron package for pkg-repo TLS renewal (Red Hat family)
+  ansible.builtin.dnf:
+    name: cronie
+    state: present
+  when:
+    - pkg_repo_tls_enabled | default(false) | bool
+    - pkg_repo_tls_cron_enabled | default(false) | bool
+    - ansible_facts['os_family'] == 'RedHat'
+
+- name: Deploy pkg-repo TLS renewal script
+  ansible.builtin.template:
+    src: renew-pkg-repo-tls-cert.sh.j2
+    dest: "{{ pkg_repo_nginx_compose_project_dir }}/renew-pkg-repo-tls-cert.sh"
+    mode: "0700"
+  when:
+    - pkg_repo_tls_enabled | default(false) | bool
+    - pkg_repo_tls_cron_enabled | default(false) | bool
+
+- name: Install pkg-repo TLS renewal cron job
+  ansible.builtin.template:
+    src: pkg-repo-tls-renew.cron.j2
+    dest: /etc/cron.d/pkg-repo-tls-renew
+    mode: "0644"
+  when:
+    - pkg_repo_tls_enabled | default(false) | bool
+    - pkg_repo_tls_cron_enabled | default(false) | bool
+
+- name: Resolve cron systemd unit for pkg-repo TLS renewal
+  ansible.builtin.set_fact:
+    pkg_repo_tls_cron_systemd_unit: >-
+      {{
+        pkg_repo_tls_cron_systemd_unit_override | default('')
+        if (pkg_repo_tls_cron_systemd_unit_override | default('') | length > 0)
+        else ('crond' if ansible_facts['os_family'] == 'RedHat' else 'cron')
+      }}
+  when:
+    - pkg_repo_tls_enabled | default(false) | bool
+    - pkg_repo_tls_cron_enabled | default(false) | bool
+
+- name: Ensure cron service is enabled for pkg-repo TLS renewal
+  ansible.builtin.systemd:
+    name: "{{ pkg_repo_tls_cron_systemd_unit }}"
+    enabled: true
+    state: started
+  when:
+    - pkg_repo_tls_enabled | default(false) | bool
+    - pkg_repo_tls_cron_enabled | default(false) | bool
+
+- name: Issue pkg-repo TLS when step-ca is already provisioned
+  ansible.builtin.import_tasks: issue_tls.yaml
+  when:
+    - pkg_repo_tls_enabled | default(false) | bool
+    - stepca_provisioned_for_pkg_repo_tls.stat.exists | default(false)
+
+- name: Deploy pkg-repo nginx vhost configuration
+  ansible.builtin.template:
+    src: pkg-repo-vhosts.conf.j2
+    dest: "{{ pkg_repo_nginx_vhosts_dir }}/pkg-repo-vhosts.conf"
+    mode: "0644"
+  register: pkg_repo_vhosts_deployed
+
+- name: Purge pkg-repo nginx disk cache after vhost configuration change
+  ansible.builtin.shell: |
+    find "{{ pkg_repo_nginx_cache_dir }}" -mindepth 1 -delete
+  args:
+    executable: /bin/bash
+  register: pkg_repo_cache_purged
+  when: pkg_repo_vhosts_deployed.changed | default(false)
+  changed_when: true
+
+- name: Deploy standalone pkg-repo nginx configuration
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: "{{ pkg_repo_nginx_config_dir }}/nginx.conf"
+    mode: "0644"
+  register: pkg_repo_nginx_conf_deployed
+  when:
+    - not (
+        (pkg_repo_nginx_shared_with_registry | default(true) | bool)
+        and (setup_registry_nginx | default(false) | bool)
+      )
+
+- name: Deploy standalone pkg-repo nginx docker compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ pkg_repo_nginx_compose_project_dir }}/docker-compose.yml"
+    mode: "0644"
+  register: pkg_repo_compose_deployed
+  when:
+    - not (
+        (pkg_repo_nginx_shared_with_registry | default(true) | bool)
+        and (setup_registry_nginx | default(false) | bool)
+      )
+
+- name: Mark pkg-repo nginx stack pending restart after configuration change
+  ansible.builtin.include_role:
+    name: 06-enable-compose-systemd
+    tasks_from: mark_compose_pending_restart.yaml
+  vars:
+    compose_pending_restart_units: >-
+      {{
+        [compose_systemd_pkg_repo_nginx_unit_name]
+        if not (
+          (pkg_repo_nginx_shared_with_registry | default(true) | bool)
+          and (setup_registry_nginx | default(false) | bool)
+        )
+        else [compose_systemd_registry_nginx_unit_name]
+      }}
+  when: >-
+    pkg_repo_vhosts_deployed.changed | default(false) or
+    pkg_repo_nginx_conf_deployed.changed | default(false) or
+    pkg_repo_compose_deployed.changed | default(false) or
+    pkg_repo_tls_cert_issued.changed | default(false) or
+    pkg_repo_issue_script_deployed.changed | default(false)
+
+# Defer metadata warm to compose_start_registry / reconcile (never warm inside render).
+- name: Mark pkg-repo metadata cache warm pending after vhost change
+  ansible.builtin.set_fact:
+    pkg_repo_cache_warm_pending: true
+    cacheable: true
+  when:
+    - pkg_repo_nginx_cache_warm_enabled | default(true) | bool
+    - pkg_repo_vhosts_deployed.changed | default(false)
+    - setup_compose_systemd | default(false) | bool

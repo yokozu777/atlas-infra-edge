@@ -1,0 +1,4 @@
+# Ansible managed: custom nginx TLS certificate renewal
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+{{ custom_nginx_tls_cron_minute }} {{ custom_nginx_tls_cron_hour }} * * * root {{ custom_nginx_compose_project_dir }}/renew-custom-nginx-tls-cert.sh >> {{ custom_nginx_tls_cron_log_file }} 2>&1

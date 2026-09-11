@@ -1,0 +1,107 @@
+#!/bin/sh
+set -eu
+
+DOCKER_UNIT="docker.service"
+STEPCA_UNIT="{{ compose_systemd_stepca_unit_name }}.service"
+CA_JSON="{{ stepca_data_dir }}/config/ca.json"
+ROOT_CA="{{ stepca_data_dir }}/certs/root_ca.crt"
+CA_HEALTH_URL="https://{{ pki_ca_host | default('ca.' ~ dns_domain_suffix, true) }}:{{ stepca_https_port }}/health"
+CA_HEALTH_HOST="{{ pki_ca_host | default('ca.' ~ dns_domain_suffix, true) }}:{{ stepca_https_port }}"
+PW_FILE="$(mktemp)"
+trap 'rm -f "$PW_FILE"' EXIT
+
+log() {
+  printf '%s\n' "$*" >&2
+}
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    log "ERROR: required command not found: $1"
+    exit 1
+  }
+}
+
+require_active_unit() {
+  unit="$1"
+  if ! systemctl is-active --quiet "$unit"; then
+    log "ERROR: systemd unit is not active: $unit"
+    systemctl status "$unit" --no-pager >&2 || true
+    exit 1
+  fi
+}
+
+require_file() {
+  path="$1"
+  if [ ! -f "$path" ]; then
+    log "ERROR: required file not found: $path"
+    exit 1
+  fi
+}
+
+require_cmd docker
+require_cmd openssl
+require_cmd curl
+require_cmd systemctl
+
+require_active_unit "$DOCKER_UNIT"
+require_active_unit "$STEPCA_UNIT"
+
+require_file "$CA_JSON"
+require_file "$ROOT_CA"
+
+if ! docker info >/dev/null 2>&1; then
+  log "ERROR: docker daemon is not reachable"
+  exit 1
+fi
+
+ready=0
+attempt=1
+max_attempts=30
+while [ "$attempt" -le "$max_attempts" ]; do
+  if curl -sf --connect-timeout 2 --max-time 5 \
+      --resolve "$CA_HEALTH_HOST:{{ registry_nginx_listen_ip | default(dns_server_ip) }}" \
+      --cacert "$ROOT_CA" \
+      "$CA_HEALTH_URL" >/dev/null; then
+    ready=1
+    break
+  fi
+  sleep 2
+  attempt=$((attempt + 1))
+done
+
+if [ "$ready" -ne 1 ]; then
+  log "ERROR: step-ca health check failed at $CA_HEALTH_URL"
+  exit 1
+fi
+
+printf '%s' '{{ stepca_init_password }}' > "$PW_FILE"
+
+docker run --rm --user root \
+  --add-host "{{ pki_ca_host | default('ca.' ~ dns_domain_suffix, true) }}:{{ registry_nginx_listen_ip | default(dns_server_ip) }}" \
+  -v "{{ stepca_data_dir }}:/home/step" \
+  -v "{{ infra_stats_tls_dir }}:/certs" \
+  -v "$PW_FILE:/tmp/pw:ro" \
+  "{{ stepca_image }}" \
+  step ca certificate \
+    --ca-url "https://{{ pki_ca_host | default('ca.' ~ dns_domain_suffix, true) }}:{{ stepca_https_port }}" \
+    --root /home/step/certs/root_ca.crt \
+    --provisioner "{{ stepca_init_provisioner_name }}" \
+    --provisioner-password-file /tmp/pw \
+{% for san in infra_stats_tls_sans %}
+    --san "{{ san }}" \
+{% endfor %}
+    --not-after "{{ infra_stats_tls_cert_duration }}" \
+    --force \
+    "{{ infra_stats_tls_common_name }}" \
+    "/certs/{{ infra_stats_tls_cert_filename }}.leaf" \
+    "/certs/{{ infra_stats_tls_key_filename }}"
+
+cat "{{ infra_stats_tls_dir }}/{{ infra_stats_tls_cert_filename }}.leaf" \
+  "{{ stepca_data_dir }}/certs/intermediate_ca.crt" \
+  > "{{ infra_stats_tls_dir }}/{{ infra_stats_tls_cert_filename }}"
+rm -f "{{ infra_stats_tls_dir }}/{{ infra_stats_tls_cert_filename }}.leaf"
+
+if ! openssl x509 -in "{{ infra_stats_tls_dir }}/{{ infra_stats_tls_cert_filename }}" -noout -checkend 86400 >/dev/null 2>&1; then
+  log "ERROR: issued infra-stats TLS certificate expires within 24 hours"
+  exit 1
+fi

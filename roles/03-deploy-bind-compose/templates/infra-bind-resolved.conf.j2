@@ -1,0 +1,8 @@
+# Ansible managed: infra host uses local BIND (role 03-deploy-bind-compose)
+[Resolve]
+DNS={{ bind_infra_resolver_nameserver }}
+Domains={{ bind_search_domain | default(dns_domain_suffix) }}
+{% if bind_forwarders | default([]) | length > 0 %}
+FallbackDNS={{ bind_forwarders | join(' ') }}
+{% endif %}
+DNSStubListener=yes

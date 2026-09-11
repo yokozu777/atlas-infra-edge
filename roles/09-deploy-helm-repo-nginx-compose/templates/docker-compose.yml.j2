@@ -1,0 +1,13 @@
+services:
+  nginx:
+    image: "{{ helm_repo_nginx_image }}"
+    container_name: "{{ helm_repo_nginx_container_name }}"
+    restart: unless-stopped
+    ports:
+      - "{{ helm_repo_nginx_listen_ip }}:{{ helm_repo_nginx_https_port }}:443/tcp"
+    volumes:
+      - {{ helm_repo_nginx_config_dir }}/nginx.conf:/etc/nginx/nginx.conf:ro
+      - {{ helm_repo_nginx_vhosts_dir }}:/etc/nginx/conf.d/helm-repo-vhosts:ro
+      - {{ helm_repo_tls_dir }}:/etc/nginx/helm-certs:ro
+      - {{ helm_repo_nginx_cache_dir }}:/var/cache/nginx/helm-repo
+      - {{ helm_repo_nginx_releases_dir }}:/var/cache/nginx/helm-releases:ro

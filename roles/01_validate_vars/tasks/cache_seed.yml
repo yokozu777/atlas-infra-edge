@@ -1,0 +1,127 @@
+---
+# XOR is always on: seed load and role-11 rsync must not both fill /opt.
+# Layer image/tag/include/creds are asserted only when that layer is enabled.
+
+- name: Assert infra cache seed load XOR role-11 rsync
+  ansible.builtin.assert:
+    that:
+      - >-
+        not (
+          (infra_cache_seed_load_enabled | default(false) | bool)
+          and (nginx_cache_sync_enabled | default(false) | bool)
+        )
+    fail_msg: >-
+      infra_cache_seed_load_enabled and nginx_cache_sync_enabled cannot both
+      be true (XOR: fill /opt from the OCI seed or from rsync, not both).
+
+- name: Assert infra cache seed publish include map when publish is enabled
+  ansible.builtin.assert:
+    that:
+      - infra_cache_seed_publish_include is mapping
+      - infra_cache_seed_publish_include.registry is defined
+      - infra_cache_seed_publish_include.helm_repo is defined
+      - infra_cache_seed_publish_include.pkg_repo is defined
+      - infra_cache_seed_publish_include.custom_www is defined
+      - >-
+        (infra_cache_seed_publish_include.registry | bool)
+        or (infra_cache_seed_publish_include.helm_repo | bool)
+        or (infra_cache_seed_publish_include.pkg_repo | bool)
+        or (infra_cache_seed_publish_include.custom_www | bool)
+      - infra_cache_seed_publish_image | default('') | trim | length > 0
+      - infra_cache_seed_publish_tag | default('') | trim | length > 0
+      - infra_cache_seed_publish_tag | trim | lower != 'latest'
+    fail_msg: >-
+      infra_cache_seed_publish_enabled=true requires a non-empty image, an
+      immutable tag (not latest), and at least one publish include flag
+  when: infra_cache_seed_publish_enabled | default(false) | bool
+
+- name: Assert infra cache seed publish include values are booleans
+  ansible.builtin.assert:
+    that:
+      - infra_cache_seed_publish_include[item] is boolean
+    fail_msg: >-
+      infra_cache_seed_publish_include.{{ item }} must be a boolean
+  loop: "{{ infra_cache_seed_include_keys }}"
+  when: infra_cache_seed_publish_enabled | default(false) | bool
+
+- name: Assert infra cache seed publish robot creds when publish is enabled
+  ansible.builtin.assert:
+    that:
+      - infra_cache_seed_publish_registry_user | default('') | trim | length > 0
+      - infra_cache_seed_publish_registry_user | trim | upper != 'CHANGEME'
+      - infra_cache_seed_publish_registry_password | default('') | trim | length > 0
+      - infra_cache_seed_publish_registry_password | trim | upper != 'CHANGEME'
+    fail_msg: >-
+      infra_cache_seed_publish_enabled=true requires real
+      infra_cache_seed_publish_registry_user/password
+      (replace CHANGEME via EXTRA_VARS_FILE / vault)
+  when: infra_cache_seed_publish_enabled | default(false) | bool
+  no_log: true
+
+- name: Assert infra cache seed load include map when load is enabled
+  ansible.builtin.assert:
+    that:
+      - infra_cache_seed_load_include is mapping
+      - infra_cache_seed_load_include.registry is defined
+      - infra_cache_seed_load_include.helm_repo is defined
+      - infra_cache_seed_load_include.pkg_repo is defined
+      - infra_cache_seed_load_include.custom_www is defined
+      - >-
+        (infra_cache_seed_load_include.registry | bool)
+        or (infra_cache_seed_load_include.helm_repo | bool)
+        or (infra_cache_seed_load_include.pkg_repo | bool)
+        or (infra_cache_seed_load_include.custom_www | bool)
+      - infra_cache_seed_load_image | default('') | trim | length > 0
+      - infra_cache_seed_load_tag | default('') | trim | length > 0
+      - infra_cache_seed_load_tag | trim | lower != 'latest'
+    fail_msg: >-
+      infra_cache_seed_load_enabled=true requires a non-empty image, an
+      immutable tag (not latest), and at least one load include flag.
+      The seed registry must be external (reachable before local Harbor).
+  when: infra_cache_seed_load_enabled | default(false) | bool
+
+- name: Assert infra cache seed load include values are booleans
+  ansible.builtin.assert:
+    that:
+      - infra_cache_seed_load_include[item] is boolean
+    fail_msg: >-
+      infra_cache_seed_load_include.{{ item }} must be a boolean
+  loop: "{{ infra_cache_seed_include_keys }}"
+  when: infra_cache_seed_load_enabled | default(false) | bool
+
+- name: Assert infra cache seed load robot creds when load is enabled
+  ansible.builtin.assert:
+    that:
+      - infra_cache_seed_load_registry_user | default('') | trim | length > 0
+      - infra_cache_seed_load_registry_user | trim | upper != 'CHANGEME'
+      - infra_cache_seed_load_registry_password | default('') | trim | length > 0
+      - infra_cache_seed_load_registry_password | trim | upper != 'CHANGEME'
+    fail_msg: >-
+      infra_cache_seed_load_enabled=true requires real
+      infra_cache_seed_load_registry_user/password
+      (replace CHANGEME via EXTRA_VARS_FILE / vault)
+  when: infra_cache_seed_load_enabled | default(false) | bool
+  no_log: true
+
+- name: Assert infra cache seed registry TLS CA source XOR when a layer is enabled
+  ansible.builtin.assert:
+    that:
+      - >-
+        (
+          (infra_cache_seed_registry_tls_ca_src | default('') | trim | length > 0)
+          and (infra_cache_seed_registry_tls_ca_dir | default('') | trim | length == 0)
+        )
+        or (
+          (infra_cache_seed_registry_tls_ca_src | default('') | trim | length == 0)
+          and (infra_cache_seed_registry_tls_ca_dir | default('') | trim | length > 0)
+        )
+    fail_msg: >-
+      infra_cache_seed_registry_tls_ca_enabled=true requires exactly one of
+      infra_cache_seed_registry_tls_ca_src (URL or host path) or
+      infra_cache_seed_registry_tls_ca_dir (controller playbook_dir folder),
+      not both and not neither.
+  when:
+    - infra_cache_seed_registry_tls_ca_enabled | default(false) | bool
+    - >-
+      (infra_cache_seed_load_enabled | default(false) | bool)
+      or (infra_cache_seed_publish_enabled | default(false) | bool)

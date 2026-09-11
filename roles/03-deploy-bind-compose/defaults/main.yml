@@ -1,0 +1,39 @@
+---
+# Override these knobs via inventory / group_vars when needed.
+# ubuntu/bind9:edge runs named as bind (container uid/gid); host bind-mounts use numeric IDs.
+bind_named_uid: 100
+bind_named_gid: 101
+
+bind_zones_subdir: zones
+bind_zones_dir: "{{ bind_config_dir }}/{{ bind_zones_subdir }}"
+bind_named_conf_path: "{{ bind_config_dir }}/named.conf"
+bind_serial_state_file: "{{ bind_config_dir }}/.zone_serial"
+# Hash of templated static records. Unchanged hash → do not rewrite .db / drop .jnl.
+bind_records_hash_file: "{{ bind_config_dir }}/.zone_records_hash"
+bind_soa_mname: "{{ bind_hostname | default('bind.' ~ dns_domain_suffix) }}"
+bind_soa_rname: "hostmaster.{{ bind_zones.apex.name | default(dns_domain_suffix) }}"
+bind_ns_host: "{{ bind_hostname | default('bind.' ~ dns_domain_suffix) }}."
+bind_zone_ttl: 86400
+bind_zone_refresh: 3600
+bind_zone_retry: 1800
+bind_zone_expire: 604800
+bind_zone_minimum: 86400
+
+# Upstream resolvers for non-authoritative queries (empty = no forwarding).
+bind_forwarders: []
+# forward only | forward first
+bind_forward_policy: only
+
+# Clients/networks allowed to query and use recursion (resolver).
+bind_allow_query:
+  - 127.0.0.1
+bind_allow_recursion:
+  - 127.0.0.1
+
+# Infra host (BIND server) uses local BIND after stack is up.
+bind_configure_infra_resolver: true
+bind_infra_resolver_nameserver: "{{ bind_listen_ip }}"
+bind_infra_resolver_wait_timeout: 120
+bind_infra_resolver_verify_retries: 10
+bind_infra_resolver_verify_delay: 3
+bind_protect_resolv_conf: true

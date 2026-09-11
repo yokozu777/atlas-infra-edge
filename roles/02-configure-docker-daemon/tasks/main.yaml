@@ -1,0 +1,93 @@
+---
+- name: Open Docker API port in firewalld (Oracle Linux)
+  ansible.posix.firewalld:
+    zone: "{{ docker_firewalld_zone }}"
+    port: "{{ item }}"
+    permanent: true
+    state: enabled
+    immediate: true
+  loop: "{{ docker_firewalld_ports }}"
+  when:
+    - ansible_facts['distribution'] == 'OracleLinux'
+    - docker_firewalld_ports | length > 0
+
+- name: Ensure systemd drop-in directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop: "{{ docker_systemd_dropin_dirs }}"
+
+- name: Ensure /etc/docker exists
+  ansible.builtin.file:
+    path: /etc/docker
+    state: directory
+    mode: '0755'
+
+- name: Check current SELinux mode for Docker daemon configuration
+  ansible.builtin.command: getenforce
+  register: docker_selinux_getenforce
+  changed_when: false
+  failed_when: false
+  when: ansible_facts['distribution'] == 'OracleLinux'
+
+- name: Determine Docker daemon SELinux integration for Oracle Linux
+  ansible.builtin.set_fact:
+    docker_daemon_selinux_enabled: >-
+      {{
+        not (disable_selinux | default(false) | bool)
+        and (
+          docker_selinux_getenforce.stdout | default('Disabled') | trim
+          not in ['Disabled', 'disabled']
+        )
+      }}
+  when: ansible_facts['distribution'] == 'OracleLinux'
+
+- name: Configure containerd LimitNOFILE drop-in
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/containerd.service.d/LimitNOFILE.conf
+    mode: '0644'
+    content: |
+      [Service]
+      LimitNOFILE={{ docker_containerd_limit_nofile }}
+  notify: Restart containerd
+
+- name: Install containerd configuration
+  ansible.builtin.template:
+    src: containerd_config.toml.j2
+    dest: "{{ docker_containerd_config_path }}"
+    mode: '0644'
+  notify: Restart containerd
+
+- name: Install Docker daemon.json
+  ansible.builtin.template:
+    src: daemon.json.j2
+    dest: "{{ docker_daemon_config_path }}"
+    mode: '0644'
+  notify: Restart docker
+
+- name: Install Docker systemd override
+  ansible.builtin.copy:
+    src: override.conf
+    dest: "{{ docker_service_override_path }}"
+    mode: '0644'
+  notify: Restart docker
+
+- name: Reload systemd after unit changes
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Apply containerd and Docker configuration changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start containerd
+  ansible.builtin.systemd:
+    name: containerd
+    enabled: true
+    state: started
+
+- name: Enable and start Docker
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started

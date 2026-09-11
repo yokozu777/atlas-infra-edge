@@ -1,0 +1,30 @@
+---
+# Override these knobs via inventory / group_vars when needed.
+
+# Optional override for cron systemd unit (empty = auto: crond on RedHat, cron on Debian).
+helm_repo_tls_cron_systemd_unit_override: ""
+
+setup_helm_repo_nginx: false
+
+# Loopback raw-index cache (public /index.yaml only rewrites). Catalog may override.
+helm_repo_nginx_cache_valid_index: 24h
+helm_repo_nginx_index_origin_port: 18080
+
+# Warm chart .tgz archives into helm-repo nginx proxy_cache (infra only; see helm_repo_cache_warm_specs).
+helm_repo_nginx_cache_warm_enabled: true
+helm_repo_nginx_cache_warm_timeout: 3600
+helm_repo_nginx_cache_warm_connect_timeout: 30
+helm_repo_nginx_cache_warm_read_timeout: 900
+helm_repo_nginx_cache_warm_wait_retries: 60
+helm_repo_nginx_cache_warm_wait_delay: 5
+helm_repo_cache_warm_specs: []
+# Host bind-mount for GitHub Releases try_files store (container: /var/cache/nginx/helm-releases).
+helm_repo_nginx_releases_dir: /opt/helm-repo-nginx/releases
+# Explicit github.com paths to curl -L into the releases store (see helm_repo_releases_warm_specs).
+helm_repo_releases_warm_specs: []
+# Official nginx alpine runtime user (warm/chown).
+helm_repo_nginx_releases_uid: 101
+helm_repo_nginx_releases_gid: 101
+# warm-helm-repo-cache.py needs PyYAML on the infra host.
+helm_repo_nginx_cache_warm_pyyaml_package_debian: python3-yaml
+helm_repo_nginx_cache_warm_pyyaml_package_redhat: python3-pyyaml

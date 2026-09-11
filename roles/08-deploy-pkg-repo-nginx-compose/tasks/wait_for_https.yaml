@@ -1,0 +1,25 @@
+---
+- name: Wait for pkg-repo nginx HTTPS before metadata warm
+  ansible.builtin.shell: |
+    set -o pipefail
+    host="{{ item }}"
+    debian_suite="{{ pkg_repo_nginx_cache_warm_debian_suite }}"
+    ubuntu_suite="{{ pkg_repo_nginx_cache_warm_ubuntu_suite }}"
+    curl -fsSk -o /dev/null --connect-timeout 10 "https://${host}/repodata/repomd.xml" \
+      || curl -fsSk -o /dev/null --connect-timeout 10 "https://${host}/dists/${debian_suite}/InRelease" \
+      || curl -fsSk -o /dev/null --connect-timeout 10 "https://${host}/dists/${ubuntu_suite}/InRelease"
+  args:
+    executable: /bin/bash
+  loop: >-
+    {{
+      [
+        pkg_repo_cache_warm_slugs[0]
+        | pkg_repo_proxy_hostname(pkg_repo_nginx_ingress_domain)
+      ]
+    }}
+  register: pkg_repo_nginx_https_wait
+  until: pkg_repo_nginx_https_wait is succeeded
+  retries: "{{ pkg_repo_nginx_cache_warm_wait_retries | default(60) }}"
+  delay: "{{ pkg_repo_nginx_cache_warm_wait_delay | default(5) }}"
+  changed_when: false
+  when: pkg_repo_cache_warm_slugs | default([]) | length > 0

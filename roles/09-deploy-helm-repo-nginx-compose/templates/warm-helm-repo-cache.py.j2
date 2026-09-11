@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""Warm helm-repo nginx proxy_cache for platform charts (run on infra, HTTPS mirror only).
+
+GitHub chart URLs (path /@chart/github.com/...) are written to the Releases file store
+from github.com (follow SAS). Do not fetch those through the mirror (that would cache SAS).
+"""
+from __future__ import annotations
+
+import json
+import os
+import ssl
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+PLAN_PATH = Path({{ helm_repo_nginx_compose_project_dir | to_json }}) / "helm-repo-cache-warm-plan.json"
+RELEASES_DIR = Path({{ helm_repo_nginx_releases_dir | to_json }})
+STORE_UID = {{ helm_repo_nginx_releases_uid | default(101) | int }}
+STORE_GID = {{ helm_repo_nginx_releases_gid | default(101) | int }}
+CONNECT_TIMEOUT = {{ helm_repo_nginx_cache_warm_connect_timeout | default(30) }}
+READ_TIMEOUT = {{ helm_repo_nginx_cache_warm_read_timeout | default(900) }}
+# urllib.urlopen timeout is a single number; Python 3.13 rejects (connect, read) tuples.
+TIMEOUT = max(CONNECT_TIMEOUT, READ_TIMEOUT)
+USER_AGENT = "helm-repo-cache-warm/1"
+GITHUB_CHART_MARK = "/@chart/github.com/"
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _ssl_context() -> ssl.SSLContext:
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def fetch(url: str) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, context=_ssl_context(), timeout=TIMEOUT) as resp:
+        return resp.read()
+
+
+def fetch_no_follow(url: str) -> tuple[int, dict[str, str], bytes]:
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=_ssl_context()),
+        _NoRedirect(),
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with opener.open(req, timeout=TIMEOUT) as resp:
+            headers = {k.lower(): v for k, v in resp.headers.items()}
+            return int(resp.status), headers, resp.read()
+    except urllib.error.HTTPError as exc:
+        headers = {k.lower(): v for k, v in exc.headers.items()} if exc.headers else {}
+        body = exc.read() if exc.fp is not None else b""
+        return int(exc.code), headers, body
+
+
+def github_path_from_mirror_url(url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    marker = GITHUB_CHART_MARK
+    if marker not in parsed.path:
+        return None
+    return parsed.path.split(marker, 1)[1].lstrip("/")
+
+
+def store_path_for(github_path: str) -> Path:
+    rel = github_path.strip().lstrip("/")
+    dest = (RELEASES_DIR / rel).resolve()
+    store = RELEASES_DIR.resolve()
+    if dest == store or store not in dest.parents:
+        raise SystemExit(f"path escapes releases store: {github_path!r}")
+    return dest
+
+
+def chown_store_path(path: Path) -> None:
+    """chmod/chown path and every parent up to RELEASES_DIR (explicit modes, ignore umask)."""
+    store = RELEASES_DIR.resolve()
+    current = path.resolve()
+    while True:
+        if current.is_dir():
+            os.chmod(current, 0o755)
+        else:
+            os.chmod(current, 0o644)
+        os.chown(current, STORE_UID, STORE_GID)
+        if current == store:
+            break
+        current = current.parent
+
+
+def write_store(github_path: str, body: bytes) -> Path:
+    if not body:
+        raise SystemExit(f"empty body for {github_path!r}")
+    if body.lstrip()[:1] == b"<":
+        raise SystemExit(f"github returned HTML for {github_path!r}")
+    dest = store_path_for(github_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(body)
+    chown_store_path(dest)
+    return dest
+
+
+def verify_try_files(mirror_url: str) -> None:
+    status, headers, _body = fetch_no_follow(mirror_url)
+    location = headers.get("location", "")
+    cache_status = headers.get("x-cache-status", "")
+    if status != 200:
+        raise SystemExit(f"try_files miss {mirror_url}: HTTP {status} location={location!r}")
+    if location:
+        raise SystemExit(f"try_files miss {mirror_url}: redirect to {location}")
+    if cache_status and cache_status != "STORE":
+        raise SystemExit(f"try_files miss {mirror_url}: X-Cache-Status={cache_status!r}")
+
+
+def load_index(entries: dict, chart: str, version: str, mirror_host: str) -> list[str]:
+    versions = entries.get(chart) or []
+    if not versions:
+        raise SystemExit(f"chart {chart!r} not found in index entries")
+    if version:
+        for item in versions:
+            if str(item.get("version", "")) == version:
+                urls = item.get("urls") or []
+                if urls:
+                    return _absolute_chart_urls(urls, mirror_host)
+        raise SystemExit(f"chart {chart!r} version {version!r} not found in index")
+    urls = versions[0].get("urls") or []
+    if not urls:
+        raise SystemExit(f"chart {chart!r} has no urls in index")
+    return _absolute_chart_urls(urls, mirror_host)
+
+
+def _absolute_chart_urls(urls: list, mirror_host: str) -> list[str]:
+    base = f"https://{mirror_host}/"
+    return [urllib.parse.urljoin(base, str(u)) for u in urls]
+
+
+def main() -> int:
+    try:
+        import yaml
+    except ImportError as exc:
+        print("PyYAML is required on infra to warm helm charts", file=sys.stderr)
+        raise SystemExit(2) from exc
+
+    plan = json.loads(PLAN_PATH.read_text(encoding="utf-8"))
+    if not plan:
+        print("empty warm plan")
+        return 0
+
+    repos: dict[str, str] = {}
+    index_cache: dict[str, dict] = {}
+    for item in plan:
+        repos[item["mirror_host"]] = item["repo"]
+
+    def index_entries(mirror_host: str) -> dict:
+        if mirror_host not in index_cache:
+            index_url = f"https://{mirror_host}/index.yaml"
+            print(f"INDEX {index_url}", flush=True)
+            index_text = fetch(index_url).decode("utf-8", errors="replace")
+            index_cache[mirror_host] = yaml.safe_load(index_text).get("entries") or {}
+        return index_cache[mirror_host]
+
+    RELEASES_DIR.mkdir(parents=True, exist_ok=True)
+    warmed: set[str] = set()
+    stored: set[str] = set()
+    for item in plan:
+        mirror_host = item["mirror_host"]
+        chart = item["chart"]
+        version = (item.get("version") or "").strip()
+        entries = index_entries(mirror_host)
+        for url in load_index(entries, chart, version, mirror_host):
+            if url in warmed:
+                continue
+            github_path = github_path_from_mirror_url(url)
+            if github_path:
+                print(f"STORE {github_path}", flush=True)
+                body = fetch(f"https://github.com/{github_path}")
+                write_store(github_path, body)
+                print(f"CHECK {url}", flush=True)
+                verify_try_files(url)
+                stored.add(github_path)
+            else:
+                print(f"WARM {url}", flush=True)
+                fetch(url)
+            warmed.add(url)
+
+    print(
+        f"helm-repo cache warm complete ({len(warmed)} chart archives, {len(stored)} github store files)",
+        flush=True,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

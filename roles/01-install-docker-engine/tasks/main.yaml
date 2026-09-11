@@ -1,0 +1,75 @@
+---
+- name: Download Docker APT GPG key (Ubuntu)
+  ansible.builtin.command:
+    cmd: curl -fsSL {{ docker_apt_ubuntu_key_url }} -o {{ docker_apt_key_path }}
+    creates: "{{ docker_apt_key_path }}"
+  when:
+    - ansible_facts['distribution'] == 'Ubuntu'
+    - not (infra_bootstrap_public_pkg_repos | default(false) | bool)
+
+- name: Download Docker APT GPG key (Debian)
+  ansible.builtin.command:
+    cmd: curl -fsSL {{ docker_apt_debian_key_url }} -o {{ docker_apt_key_path }}
+    creates: "{{ docker_apt_key_path }}"
+  when:
+    - ansible_facts['distribution'] == 'Debian'
+    - not (infra_bootstrap_public_pkg_repos | default(false) | bool)
+
+- name: Add Docker APT repository (Ubuntu)
+  ansible.builtin.deb822_repository:
+    name: docker
+    types: deb
+    uris: "{{ 'ubuntu-containerd' | pkg_repo_client_uri(use_internal_rpm_apt_repo, nexus_base_url, pkg_repo_nginx_ingress_domain, pkg_repo_upstreams) }}"
+    suites: "{{ ansible_facts['distribution_release'] }}"
+    components: stable
+    signed_by: "{{ docker_apt_key_path }}"
+    state: present
+    enabled: true
+    install_python_debian: true
+  when:
+    - ansible_facts['distribution'] == 'Ubuntu'
+    - not (infra_bootstrap_public_pkg_repos | default(false) | bool)
+    - enable_repo_ubuntu_containerd | default(true) | bool
+
+- name: Add Docker APT repository (Debian)
+  ansible.builtin.deb822_repository:
+    name: docker
+    types: deb
+    uris: "{{ 'debian-containerd' | pkg_repo_client_uri(use_internal_rpm_apt_repo, nexus_base_url, pkg_repo_nginx_ingress_domain, pkg_repo_upstreams) }}"
+    suites: "{{ ansible_facts['distribution_release'] }}"
+    components: stable
+    signed_by: "{{ docker_apt_key_path }}"
+    state: present
+    enabled: true
+    install_python_debian: true
+  when:
+    - ansible_facts['distribution'] == 'Debian'
+    - not (infra_bootstrap_public_pkg_repos | default(false) | bool)
+    - enable_repo_debian_containerd | default(true) | bool
+
+- name: Install Docker engine packages (Ubuntu/Debian)
+  ansible.builtin.apt:
+    name: "{{ docker_packages }}"
+    state: present
+    update_cache: true
+    install_recommends: false
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Install Docker engine packages (Oracle Linux)
+  ansible.builtin.dnf:
+    name: "{{ docker_packages }}"
+    state: present
+    install_weak_deps: false
+  when: ansible_facts['distribution'] == 'OracleLinux'
+
+- name: Ensure docker group exists
+  ansible.builtin.group:
+    name: "{{ docker_group_name }}"
+    state: present
+
+- name: Add user to docker group
+  ansible.builtin.user:
+    name: "{{ docker_group_user }}"
+    groups: "{{ docker_group_name }}"
+    append: true
+  when: docker_group_user | length > 0

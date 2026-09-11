@@ -1,0 +1,37 @@
+---
+- name: Clone custom nginx content source for {{ content_item.name }}
+  ansible.builtin.git:
+    repo: "{{ content_item.source_repo }}"
+    dest: "/tmp/ansible-custom-nginx-sync-{{ content_item.name }}-{{ content_item.version }}"
+    version: "v{{ content_item.version }}"
+    depth: 1
+    force: true
+
+- name: Ensure custom nginx destination directory exists for {{ content_item.name }}
+  ansible.builtin.file:
+    path: "{{ custom_nginx_www_dir }}/{{ content_item.dest_subdir }}"
+    state: directory
+    mode: "0755"
+
+- name: Install synced paths for {{ content_item.name }}
+  ansible.builtin.copy:
+    src: "/tmp/ansible-custom-nginx-sync-{{ content_item.name }}-{{ content_item.version }}/{{ sync_path }}/"
+    dest: "{{ custom_nginx_www_dir }}/{{ content_item.dest_subdir }}/{{ sync_path }}/"
+    remote_src: true
+    mode: preserve
+  loop: "{{ content_item.sync_paths }}"
+  loop_control:
+    loop_var: sync_path
+
+- name: Remove temporary custom nginx content clone for {{ content_item.name }}
+  ansible.builtin.file:
+    path: "/tmp/ansible-custom-nginx-sync-{{ content_item.name }}-{{ content_item.version }}"
+    state: absent
+
+- name: Build downloadable archive for {{ content_item.name }}
+  ansible.builtin.archive:
+    path:
+      - "{{ custom_nginx_www_dir }}/{{ content_item.dest_subdir }}/client"
+      - "{{ custom_nginx_www_dir }}/{{ content_item.dest_subdir }}/deploy"
+    dest: "{{ custom_nginx_www_dir }}/{{ content_item.name }}-v{{ content_item.version }}.tar.gz"
+    format: gz

@@ -1,0 +1,54 @@
+---
+# Persist local stamp after a successful full pull when skip-if-fresh is enabled.
+# Never runs on skip; never runs when the play failed before this task.
+
+- name: Ensure infra cache sync stamp parent directory exists
+  ansible.builtin.file:
+    path: "{{ nginx_cache_sync_stamp_path | dirname }}"
+    state: directory
+    mode: "0755"
+
+- name: Compute remote fingerprint for stamp when missing
+  ansible.builtin.include_tasks: compute_remote_fingerprint.yaml
+  when: (nginx_cache_sync_remote_fingerprint | default('') | length) == 0
+
+- name: Require remote fingerprint before writing stamp
+  ansible.builtin.assert:
+    that:
+      - (nginx_cache_sync_remote_fingerprint | default('') | length) > 0
+    fail_msg: >-
+      Cannot write infra cache sync stamp without nginx_cache_sync_remote_fingerprint.
+
+- name: Build infra cache sync stamp document
+  ansible.builtin.set_fact:
+    nginx_cache_sync_stamp_doc: >-
+      {{
+        {
+          'version': 1,
+          'fingerprint': nginx_cache_sync_remote_fingerprint | string,
+          'remote_host': nginx_cache_sync_remote_host | string,
+          'remote_port': nginx_cache_sync_remote_port | int,
+          'remote_dir': nginx_cache_sync_remote_dir | string,
+          'components': (
+            (nginx_cache_sync_components | default([]) | map(attribute='name') | list)
+            + (['registry'] if (nginx_cache_sync_registry_enabled | bool) else [])
+          ),
+          'remote_du': nginx_cache_sync_remote_du_stdout | default('') | string,
+          'pulled_at': ansible_date_time.iso8601 | default('') | string
+        }
+      }}
+
+- name: Write local infra cache sync stamp after successful pull
+  ansible.builtin.copy:
+    dest: "{{ nginx_cache_sync_stamp_path }}"
+    mode: "0644"
+    content: "{{ nginx_cache_sync_stamp_doc | to_nice_yaml(indent=2) }}"
+  register: nginx_cache_sync_stamp_write
+
+- name: Log infra cache sync stamp update
+  ansible.builtin.debug:
+    msg: >-
+      atlas_infra_cache_sync stamp_written
+      path={{ nginx_cache_sync_stamp_path }}
+      fingerprint={{ nginx_cache_sync_remote_fingerprint | truncate(16, true, '') }}
+      changed={{ nginx_cache_sync_stamp_write.changed | default(false) }}

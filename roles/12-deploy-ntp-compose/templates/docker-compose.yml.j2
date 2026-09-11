@@ -1,0 +1,20 @@
+services:
+  ntp:
+    image: "{{ ntp_image }}"
+    container_name: "{{ ntp_container_name }}"
+    hostname: "{{ ntp_hostname }}"
+    restart: unless-stopped
+    dns:
+      - {{ dns_server_ip }}
+    ports:
+      - "{{ ntp_listen_ip }}:123:123/udp"
+    environment:
+      # cturra/ntp: comma-separated list, no spaces (see cturra/docker-ntp assets/startup.sh)
+      - NTP_SERVERS={{ ntp_upstream_servers | join(',') }}
+      - LOG_LEVEL={{ ntp_log_level }}
+    cap_add:
+      - SYS_TIME
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: 1
+      net.ipv6.conf.default.disable_ipv6: 1
+      net.ipv6.conf.lo.disable_ipv6: 1

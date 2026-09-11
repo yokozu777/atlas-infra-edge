@@ -1,0 +1,19 @@
+---
+# Controller-side dirs only (compose stacks run on infra_platform).
+- name: Build workspace directory list
+  ansible.builtin.set_fact:
+    _workspace_dirs:
+      - "{{ cluster_workspace_root }}"
+      - "{{ cluster_workspace_root }}/.ansible"
+      - "{{ cluster_workspace_root }}/.ansible/tmp"
+      - "{{ cluster_workspace_root }}/.ansible_facts_cache"
+      - "{{ cluster_workspace_root }}/logs"
+      - "{{ cluster_workspace_root }}/build"
+      - "{{ cluster_workspace_root }}/generated"
+
+- name: Ensure workspace directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop: "{{ _workspace_dirs | unique | reject('equalto', '') | list }}"

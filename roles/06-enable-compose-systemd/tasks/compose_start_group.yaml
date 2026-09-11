@@ -1,0 +1,128 @@
+---
+# Phase 3/6 orchestrator: start dedicated units for one start_group (topo-sorted).
+# Required var: compose_start_group (core | registry)
+#
+# Order per stack: pre_start → bootstrap|systemd start → post_start → warm.
+
+- name: Require compose_start_group for start phase
+  ansible.builtin.assert:
+    that:
+      - compose_start_group | default('') | length > 0
+      - compose_start_group in ['core', 'registry']
+    fail_msg: >-
+      compose_start_group must be set to 'core' or 'registry'
+      (got {{ compose_start_group | default('') | quote }}).
+
+- name: Begin compose_start timing
+  ansible.builtin.import_tasks: compose_timing_begin.yaml
+  vars:
+    compose_timing_phase: "compose_start_{{ compose_start_group }}"
+
+- name: Resolve and topo-sort compose stacks for start group
+  ansible.builtin.set_fact:
+    compose_stacks_start: >-
+      {{
+        infra_compose_stacks
+        | compose_stacks_in_group(vars, compose_start_group)
+        | compose_topo_sort
+      }}
+
+# Include shared sidecars (pkg/helm/custom) in the same start_group.
+# Topo-sort by after[] so hooks (e.g. infra_stats publish) run after peer TLS leaves
+# regardless of catalog order.
+- name: Resolve compose stacks for pre_start hooks (includes shared sidecars)
+  ansible.builtin.set_fact:
+    compose_stacks_pre_start: >-
+      {{
+        infra_compose_stacks
+        | compose_stacks_for_render(vars)
+        | selectattr('start_group', 'equalto', compose_start_group)
+        | list
+        | compose_topo_sort
+      }}
+
+- name: Run pre_start hooks before compose unit start
+  ansible.builtin.include_tasks: compose_run_pre_start.yaml
+  loop: "{{ compose_stacks_pre_start | default([]) }}"
+  loop_control:
+    loop_var: compose_pre_start_stack
+    label: "{{ compose_pre_start_stack.id }}"
+  when: (compose_pre_start_stack.pre_start | default([]) | length) > 0
+
+- name: Bootstrap compose stack that requires mid-role start
+  ansible.builtin.include_role:
+    name: "{{ item.role }}"
+    tasks_from: "{{ item.bootstrap_from }}"
+  loop: "{{ compose_stacks_start | default([]) }}"
+  loop_control:
+    label: "{{ item.id }}"
+  when: (item.bootstrap_from | default('') | length) > 0
+
+- name: Enable and start compose systemd unit for stack
+  ansible.builtin.systemd:
+    name: "{{ vars[item.unit_name_var] }}.service"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop: "{{ compose_stacks_start | default([]) }}"
+  loop_control:
+    label: "{{ item.id }}"
+  when:
+    - setup_compose_systemd | default(false) | bool
+    - (item.bootstrap_from | default('') | length) == 0
+    - vars[item.unit_name_var] is defined
+    - (vars[item.unit_name_var] | default('') | length) > 0
+
+- name: Run post_start hooks for started compose stacks
+  ansible.builtin.include_tasks: compose_run_post_start.yaml
+  loop: "{{ compose_stacks_start | default([]) }}"
+  loop_control:
+    loop_var: compose_post_start_stack
+    label: "{{ compose_post_start_stack.id }}"
+  when: (compose_post_start_stack.post_start | default([]) | length) > 0
+
+- name: Wait for registry nginx before shared pkg-repo warm
+  ansible.builtin.command:
+    cmd: docker inspect -f '{{ "{{" }}.State.Running{{ "}}" }}' {{ registry_nginx_container_name }}
+  register: compose_registry_nginx_running_for_warm
+  until: compose_registry_nginx_running_for_warm.stdout == 'true'
+  retries: "{{ pkg_repo_nginx_warm_container_wait_retries | default(30) }}"
+  delay: "{{ pkg_repo_nginx_warm_container_wait_delay | default(5) }}"
+  changed_when: false
+  when:
+    - compose_start_group == 'registry'
+    - setup_apt_rpm_nginx | default(false) | bool
+    - pkg_repo_nginx_cache_warm_enabled | default(true) | bool
+    - pkg_repo_nginx_shared_with_registry | default(true) | bool
+    - setup_registry_nginx | default(false) | bool
+
+- name: Resolve compose stacks for warm hooks (includes shared sidecars)
+  ansible.builtin.set_fact:
+    compose_stacks_warm: >-
+      {{
+        infra_compose_stacks
+        | compose_stacks_for_render(vars)
+        | selectattr('start_group', 'equalto', compose_start_group)
+        | list
+      }}
+
+- name: Run warm hooks for compose stacks in start group
+  ansible.builtin.include_tasks: compose_run_warm.yaml
+  loop: "{{ compose_stacks_warm | default([]) }}"
+  loop_control:
+    loop_var: compose_warm_stack
+    label: "{{ compose_warm_stack.id }}"
+  when: (compose_warm_stack.warm | default([]) | length) > 0
+
+- name: Clear pkg-repo cache warm pending after start_registry warm
+  ansible.builtin.set_fact:
+    pkg_repo_cache_warm_pending: false
+    cacheable: true
+  when:
+    - compose_start_group == 'registry'
+    - pkg_repo_cache_warm_pending | default(false) | bool
+
+- name: End compose_start timing
+  ansible.builtin.import_tasks: compose_timing_end.yaml
+  vars:
+    compose_timing_phase: "compose_start_{{ compose_start_group }}"

@@ -1,0 +1,4 @@
+---
+# Phase 5: thin entry — render only. Pull/start live in compose_* phases.
+- name: Render infra-stats static page + vhost
+  ansible.builtin.import_tasks: render.yaml

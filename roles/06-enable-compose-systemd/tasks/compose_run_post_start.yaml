@@ -1,0 +1,10 @@
+---
+# Nested from compose_start_group.yaml — runs post_start hooks for one stack.
+- name: Run post_start hook for compose stack
+  ansible.builtin.include_role:
+    name: "{{ compose_post_start_stack.role }}"
+    tasks_from: "{{ hook }}"
+  loop: "{{ compose_post_start_stack.post_start | default([]) }}"
+  loop_control:
+    loop_var: hook
+    label: "{{ compose_post_start_stack.id }}/{{ hook }}"

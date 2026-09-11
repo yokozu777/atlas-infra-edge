@@ -1,0 +1,62 @@
+---
+# Issue/refresh helm-repo TLS via step-ca. Requires provisioned CA.
+# Render when CA exists; pre_start on cold path after compose_start_core.
+
+- name: Require provisioned step-ca for helm-repo TLS
+  ansible.builtin.assert:
+    that:
+      - stepca_provisioned_for_helm_repo_tls is defined
+      - stepca_provisioned_for_helm_repo_tls.stat.exists | default(false)
+    fail_msg: >-
+      step-ca is not provisioned yet (missing {{ stepca_provisioned_marker }}).
+      Cold path: compose_start_core must finish before compose_start_registry.
+  when: helm_repo_tls_enabled | default(false) | bool
+
+- name: Check helm-repo TLS certificate file
+  ansible.builtin.stat:
+    path: "{{ helm_repo_tls_dir }}/{{ helm_repo_tls_cert_filename }}"
+  register: helm_repo_tls_cert_stat
+  when: helm_repo_tls_enabled | default(false) | bool
+
+- name: Check helm-repo TLS wildcard SAN coverage
+  ansible.builtin.command:
+    cmd: >-
+      openssl x509 -in {{ helm_repo_tls_dir }}/{{ helm_repo_tls_cert_filename }}
+      -noout -ext subjectAltName
+  register: helm_repo_tls_cert_sans
+  changed_when: false
+  when:
+    - helm_repo_tls_enabled | default(false) | bool
+    - helm_repo_tls_cert_stat.stat.exists | default(false)
+
+- name: Remove helm-repo TLS certificate when SAN coverage is outdated
+  ansible.builtin.file:
+    path: "{{ helm_repo_tls_dir }}/{{ helm_repo_tls_cert_filename }}"
+    state: absent
+  register: helm_repo_tls_cert_removed
+  when:
+    - helm_repo_tls_enabled | default(false) | bool
+    - helm_repo_tls_cert_stat.stat.exists | default(false)
+    - ('*.{{ helm_repo_nginx_ingress_domain }}') not in helm_repo_tls_cert_sans.stdout
+
+- name: Issue initial helm-repo TLS certificate when missing
+  ansible.builtin.command:
+    cmd: "{{ helm_repo_nginx_compose_project_dir }}/issue-helm-repo-tls-cert.sh"
+  register: helm_repo_tls_cert_issued
+  when:
+    - helm_repo_tls_enabled | default(false) | bool
+    - not helm_repo_tls_cert_stat.stat.exists | default(false)
+      or (helm_repo_tls_cert_removed is defined and helm_repo_tls_cert_removed.changed | default(false))
+  no_log: true
+  changed_when: helm_repo_tls_cert_issued.rc == 0
+
+- name: Set helm-repo TLS file permissions
+  ansible.builtin.file:
+    path: "{{ helm_repo_tls_dir }}/{{ item.path }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ helm_repo_tls_cert_filename }}"
+      mode: "0644"
+    - path: "{{ helm_repo_tls_key_filename }}"
+      mode: "0600"
+  when: helm_repo_tls_enabled | default(false) | bool

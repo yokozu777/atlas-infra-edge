@@ -1,0 +1,53 @@
+---
+# GitHub Releases file-store warm specs (role 09). Empty list is valid.
+
+- name: Assert helm_repo_releases_warm_specs is a list
+  ansible.builtin.assert:
+    that:
+      - helm_repo_releases_warm_specs | default([]) is sequence
+      - helm_repo_releases_warm_specs | default([]) is not string
+      - helm_repo_nginx_releases_github_allowlist | default([]) is sequence
+      - helm_repo_nginx_releases_github_allowlist | default([]) is not string
+    fail_msg: >-
+      helm_repo_releases_warm_specs and helm_repo_nginx_releases_github_allowlist
+      must be lists.
+
+- name: Assert helm_repo_releases_warm_specs paths are safe and allowlisted
+  ansible.builtin.assert:
+    that:
+      - item.path is defined
+      - item.path is string
+      - (item.path | trim | length) > 0
+      - "'..' not in (item.path | string)"
+      - not ((item.path | trim) is match('/'))
+      - (item.path | trim) is regex('^[A-Za-z0-9][A-Za-z0-9._/-]*$')
+      - >-
+          (
+            helm_repo_nginx_releases_github_allowlist | default([])
+            | map('trim')
+            | map('regex_replace', '/+$', '')
+            | reject('equalto', '')
+            | list
+            | length > 0
+          )
+      - >-
+          (item.path | trim) is regex(
+            '^('
+            ~ (
+              helm_repo_nginx_releases_github_allowlist | default([])
+              | map('trim')
+              | map('regex_replace', '/+$', '')
+              | reject('equalto', '')
+              | map('regex_escape')
+              | list
+              | join('|')
+            )
+            ~ ')(/.*)?$'
+          )
+    fail_msg: >-
+      helm_repo_releases_warm_specs path {{ item.path | default('') | quote }}
+      must be a relative GitHub path under helm_repo_nginx_releases_github_allowlist
+      (non-empty, no '..', no leading slash).
+  loop: "{{ helm_repo_releases_warm_specs | default([]) }}"
+  loop_control:
+    label: "{{ item.path | default('') }}"

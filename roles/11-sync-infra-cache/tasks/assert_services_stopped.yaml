@@ -1,0 +1,59 @@
+---
+- name: Assert registry nginx container is not running before cache sync
+  ansible.builtin.command:
+    cmd: docker inspect -f '{{ "{{" }}.State.Running{{ "}}" }}' {{ registry_nginx_container_name }}
+  register: nginx_cache_sync_registry_nginx_running
+  changed_when: false
+  failed_when: >-
+    nginx_cache_sync_registry_nginx_running.rc == 0
+    and nginx_cache_sync_registry_nginx_running.stdout == 'true'
+  when: nginx_cache_sync_needs_registry_nginx_stop | bool
+
+- name: Assert registry compose stack has no running containers before cache sync
+  ansible.builtin.command:
+    cmd: docker compose ps -q
+    chdir: "{{ registry_compose_project_dir }}"
+  register: nginx_cache_sync_registry_compose_ps
+  changed_when: false
+  failed_when: nginx_cache_sync_registry_compose_ps.stdout | trim | length > 0
+  when: nginx_cache_sync_registry_enabled | bool
+
+- name: Assert registry compose unit is inactive before cache sync
+  ansible.builtin.command:
+    cmd: systemctl is-active {{ compose_systemd_registry_unit_name }}.service
+  register: nginx_cache_sync_registry_compose_active
+  changed_when: false
+  failed_when: nginx_cache_sync_registry_compose_active.stdout == 'active'
+  when:
+    - nginx_cache_sync_registry_enabled | bool
+    - setup_compose_systemd | default(false) | bool
+
+- name: Assert standalone pkg-repo nginx container is not running before cache sync
+  ansible.builtin.command:
+    cmd: docker inspect -f '{{ "{{" }}.State.Running{{ "}}" }}' {{ pkg_repo_nginx_container_name }}
+  register: nginx_cache_sync_pkg_repo_nginx_running
+  changed_when: false
+  failed_when: >-
+    nginx_cache_sync_pkg_repo_nginx_running.rc == 0
+    and nginx_cache_sync_pkg_repo_nginx_running.stdout == 'true'
+  when: nginx_cache_sync_needs_pkg_repo_nginx_stop | bool
+
+- name: Assert standalone helm-repo nginx container is not running before cache sync
+  ansible.builtin.command:
+    cmd: docker inspect -f '{{ "{{" }}.State.Running{{ "}}" }}' {{ helm_repo_nginx_container_name }}
+  register: nginx_cache_sync_helm_repo_nginx_running
+  changed_when: false
+  failed_when: >-
+    nginx_cache_sync_helm_repo_nginx_running.rc == 0
+    and nginx_cache_sync_helm_repo_nginx_running.stdout == 'true'
+  when: nginx_cache_sync_needs_helm_repo_nginx_stop | bool
+
+- name: Assert standalone custom nginx container is not running before cache sync
+  ansible.builtin.command:
+    cmd: docker inspect -f '{{ "{{" }}.State.Running{{ "}}" }}' {{ custom_nginx_container_name }}
+  register: nginx_cache_sync_custom_nginx_running
+  changed_when: false
+  failed_when: >-
+    nginx_cache_sync_custom_nginx_running.rc == 0
+    and nginx_cache_sync_custom_nginx_running.stdout == 'true'
+  when: nginx_cache_sync_needs_custom_nginx_stop | bool

@@ -1,0 +1,46 @@
+services:
+  nginx:
+    image: "{{ registry_nginx_image }}"
+    container_name: "{{ registry_nginx_container_name }}"
+    restart: unless-stopped
+    # Upstream CDN AAAA often exists while the container has no IPv6 route —
+    # disable IPv6 so getaddrinfo / connects stay on IPv4.
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: 1
+      net.ipv6.conf.default.disable_ipv6: 1
+      net.ipv6.conf.lo.disable_ipv6: 1
+    dns:
+      - {{ dns_server_ip }}
+    ports:
+      - "{{ registry_nginx_listen_ip }}:{{ registry_nginx_https_port }}:443/tcp"
+    volumes:
+      - {{ registry_nginx_config_dir }}/nginx.conf:/etc/nginx/nginx.conf:ro
+      - {{ registry_tls_dir }}:/etc/nginx/certs:ro
+{% if setup_apt_rpm_nginx | default(false) | bool and pkg_repo_nginx_shared_with_registry | default(true) | bool %}
+      - {{ pkg_repo_nginx_vhosts_dir }}:/etc/nginx/pkg-repo-vhosts:ro
+      - {{ pkg_repo_nginx_cache_dir }}:/var/cache/nginx/pkg-repo
+      - {{ pkg_repo_tls_dir }}:/etc/nginx/pkg-certs:ro
+{% endif %}
+{% if setup_helm_nginx | default(false) | bool and helm_repo_nginx_shared_with_registry | default(true) | bool %}
+      - {{ helm_repo_nginx_vhosts_dir }}:/etc/nginx/helm-repo-vhosts:ro
+      - {{ helm_repo_nginx_cache_dir }}:/var/cache/nginx/helm-repo
+      - {{ helm_repo_nginx_releases_dir }}:/var/cache/nginx/helm-releases:ro
+      - {{ helm_repo_tls_dir }}:/etc/nginx/helm-certs:ro
+{% endif %}
+{% if setup_custom_content_nginx | default(false) | bool and custom_nginx_shared_with_registry | default(true) | bool %}
+      - {{ custom_nginx_vhosts_dir }}:/etc/nginx/custom-nginx-vhosts:ro
+      - {{ custom_nginx_tls_dir }}:/etc/nginx/custom-certs:ro
+      - {{ custom_nginx_www_dir }}:/var/www/custom:ro
+{% endif %}
+{% if setup_infra_stats | default(false) | bool and infra_stats_shared_with_registry | default(true) | bool %}
+      - {{ infra_stats_vhosts_dir }}:/etc/nginx/infra-stats-vhosts:ro
+      - {{ infra_stats_tls_dir }}:/etc/nginx/infra-stats-certs:ro
+      - {{ infra_stats_html_dir }}:{{ infra_stats_html_container_path }}:ro
+{% endif %}
+    networks:
+      - {{ registry_internal_network_name }}
+
+networks:
+  {{ registry_internal_network_name }}:
+    external: true
+    name: {{ registry_internal_network_name }}

@@ -1,0 +1,37 @@
+---
+- ansible.builtin.import_tasks: validate.yaml
+
+- ansible.builtin.import_tasks: pre_sync.yaml
+
+- ansible.builtin.import_tasks: check_fresh.yaml
+  when: nginx_cache_sync_direction == 'pull'
+
+# Stop → rsync → ownership/stamp: always restart held/stopped services even if
+# rsync fails (always). Warm runs only after a successful mutation block.
+- name: Infra cache sync mutation with service restart guarantee
+  when: not (nginx_cache_sync_skip_pull | default(false) | bool)
+  block:
+    - ansible.builtin.include_tasks: stop_services.yaml
+      when: nginx_cache_sync_stop_services | bool
+
+    - ansible.builtin.include_tasks: assert_services_stopped.yaml
+      when: nginx_cache_sync_stop_services | bool
+
+    - ansible.builtin.include_tasks: sync_push.yaml
+      when: nginx_cache_sync_direction == 'push'
+
+    - ansible.builtin.include_tasks: sync_pull.yaml
+      when: nginx_cache_sync_direction == 'pull'
+
+    - ansible.builtin.include_tasks: fix_cache_ownership.yaml
+      when: nginx_cache_sync_direction == 'pull'
+
+    - ansible.builtin.include_tasks: write_stamp.yaml
+      when:
+        - nginx_cache_sync_direction == 'pull'
+        - nginx_cache_sync_skip_if_fresh | default(false) | bool
+
+    - ansible.builtin.include_tasks: post_sync.yaml
+  always:
+    - ansible.builtin.include_tasks: restart_services.yaml
+      when: nginx_cache_sync_stop_services | bool

@@ -1,0 +1,38 @@
+---
+- name: Reset infra cache seed extract argv
+  ansible.builtin.set_fact:
+    infra_cache_seed_extract_argv:
+      - docker
+      - run
+      - --rm
+      - -v
+      - "{{ infra_cache_seed_work_dir }}/extract.sh:/extract.sh:ro"
+
+- name: Append bind-mounts to infra cache seed extract argv
+  ansible.builtin.set_fact:
+    infra_cache_seed_extract_argv: >-
+      {{
+        infra_cache_seed_extract_argv
+        + ['-v', item.host_dir ~ ':/out/' ~ item.seed_dir]
+      }}
+  loop: "{{ infra_cache_seed_components | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Append image and extract command to argv
+  ansible.builtin.set_fact:
+    infra_cache_seed_extract_argv: >-
+      {{
+        infra_cache_seed_extract_argv
+        + [
+            infra_cache_seed_image ~ ':' ~ infra_cache_seed_tag,
+            '/bin/sh',
+            '/extract.sh'
+          ]
+      }}
+
+- name: Extract infra cache seed onto host bind-mounts
+  ansible.builtin.command:
+    argv: "{{ infra_cache_seed_extract_argv }}"
+  async: "{{ infra_cache_seed_load_timeout_sec | int }}"
+  poll: "{{ infra_cache_seed_async_poll_sec | int }}"

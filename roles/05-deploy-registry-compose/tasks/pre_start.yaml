@@ -1,0 +1,26 @@
+---
+# compose_start_registry pre_start: issue TLS after step-ca is up (cold path).
+
+- name: Check step-ca provision state for registry TLS
+  ansible.builtin.stat:
+    path: "{{ stepca_provisioned_marker }}"
+  register: stepca_provisioned_for_registry_tls
+  when: registry_tls_enabled | default(false) | bool
+
+- name: Issue registry TLS certificates
+  ansible.builtin.import_tasks: issue_tls.yaml
+  when: registry_tls_enabled | default(false) | bool
+
+- name: Mark registry stacks pending restart after deferred TLS issue
+  ansible.builtin.include_role:
+    name: 06-enable-compose-systemd
+    tasks_from: mark_compose_pending_restart.yaml
+  vars:
+    compose_pending_restart_units: >-
+      {{
+        [compose_systemd_registry_unit_name]
+        + ([compose_systemd_registry_nginx_unit_name] if (setup_registry_nginx | default(false) | bool) else [])
+      }}
+  when:
+    - registry_tls_enabled | default(false) | bool
+    - registry_tls_cert_issued.changed | default(false)

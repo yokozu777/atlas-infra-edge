@@ -1,0 +1,78 @@
+---
+# Fallback when BuildKit additional contexts / COPY --exclude are unavailable.
+# rsync enabled trees into the work dir (registry certs excluded) and rebuild
+# with the classic builder (no dockerfile:1.7 frontend).
+
+- name: Mark infra cache seed publish as staging fallback
+  ansible.builtin.set_fact:
+    infra_cache_seed_publish_use_staging: true
+
+- name: Require rsync for infra cache seed staging fallback
+  ansible.builtin.command:
+    argv:
+      - rsync
+      - --version
+  changed_when: false
+
+- name: Require free disk for infra cache seed staging copy
+  ansible.builtin.shell: |
+    set -euo pipefail
+    work={{ infra_cache_seed_work_dir | quote }}
+    mkdir -p "$work"
+    free="$(df -B1 "$work" | tail -1 | awk '{print $4}')"
+    need=0
+    {% for item in infra_cache_seed_components | default([]) %}
+    if [ -d {{ item.host_dir | quote }} ]; then
+      sz="$(du -sb {{ item.host_dir | quote }} | awk '{print $1}')"
+      need=$((need + sz))
+    fi
+    {% endfor %}
+    if [ "$free" -lt "$need" ]; then
+      echo "FAIL: staging needs ${need}B, $work has ${free}B free" >&2
+      exit 1
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Stage infra cache seed component trees
+  ansible.builtin.command:
+    cmd: >-
+      rsync -a --delete
+      {% if item.name == 'registry' %}--exclude=certs/ --exclude=certs{% endif %}
+      {{ item.host_dir }}/
+      {{ infra_cache_seed_work_dir }}/{{ item.seed_dir }}/
+  loop: "{{ infra_cache_seed_components | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Re-render infra cache seed Dockerfile for staging COPY
+  ansible.builtin.template:
+    src: Dockerfile.j2
+    dest: "{{ infra_cache_seed_work_dir }}/Dockerfile"
+    mode: "0644"
+
+- name: Build infra cache seed image from staging directory
+  ansible.builtin.command:
+    argv:
+      - docker
+      - build
+      - -f
+      - "{{ infra_cache_seed_work_dir }}/Dockerfile"
+      - -t
+      - "{{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}"
+      - "{{ infra_cache_seed_work_dir }}"
+  environment:
+    DOCKER_BUILDKIT: "0"
+  async: "{{ infra_cache_seed_publish_timeout_sec | int }}"
+  poll: "{{ infra_cache_seed_async_poll_sec | int }}"
+  register: infra_cache_seed_staging_build
+
+- name: Remove infra cache seed staging trees after build
+  ansible.builtin.file:
+    path: "{{ infra_cache_seed_work_dir }}/{{ item.seed_dir }}"
+    state: absent
+  loop: "{{ infra_cache_seed_components | default([]) }}"
+  loop_control:
+    label: "{{ item.seed_dir }}"
+  when: infra_cache_seed_staging_build.rc | default(1) == 0

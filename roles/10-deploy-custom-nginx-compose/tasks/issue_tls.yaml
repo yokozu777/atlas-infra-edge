@@ -1,0 +1,40 @@
+---
+# Issue/refresh custom nginx TLS via step-ca. Requires provisioned CA.
+# Render when CA exists; pre_start on cold path after compose_start_core.
+
+- name: Require provisioned step-ca for custom nginx TLS
+  ansible.builtin.assert:
+    that:
+      - stepca_provisioned_for_custom_nginx_tls is defined
+      - stepca_provisioned_for_custom_nginx_tls.stat.exists | default(false)
+    fail_msg: >-
+      step-ca is not provisioned yet (missing {{ stepca_provisioned_marker }}).
+      Cold path: compose_start_core must finish before compose_start_registry.
+  when: custom_nginx_tls_enabled | default(false) | bool
+
+- name: Check custom nginx TLS certificate file
+  ansible.builtin.stat:
+    path: "{{ custom_nginx_tls_dir }}/{{ custom_nginx_tls_cert_filename }}"
+  register: custom_nginx_tls_cert_stat
+  when: custom_nginx_tls_enabled | default(false) | bool
+
+- name: Issue initial custom nginx TLS certificate when missing
+  ansible.builtin.command:
+    cmd: "{{ custom_nginx_compose_project_dir }}/issue-custom-nginx-tls-cert.sh"
+  register: custom_nginx_tls_cert_issued
+  when:
+    - custom_nginx_tls_enabled | default(false) | bool
+    - not custom_nginx_tls_cert_stat.stat.exists | default(false)
+  no_log: true
+  changed_when: custom_nginx_tls_cert_issued.rc == 0
+
+- name: Set custom nginx TLS file permissions
+  ansible.builtin.file:
+    path: "{{ custom_nginx_tls_dir }}/{{ item.path }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ custom_nginx_tls_cert_filename }}"
+      mode: "0644"
+    - path: "{{ custom_nginx_tls_key_filename }}"
+      mode: "0600"
+  when: custom_nginx_tls_enabled | default(false) | bool

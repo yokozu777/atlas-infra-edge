@@ -1,0 +1,53 @@
+---
+# Inventory group name used by playbook hosts: and groups[...] lookups.
+# Override only when your inventory uses a different group name.
+infra_platform_hosts: infra_platform
+
+# Cache-sync knobs validated on localhost (role 11 defaults are not loaded here).
+# Keep in sync with roles/11-sync-infra-cache/defaults/main.yml.
+nginx_cache_sync_ownership_resolve: static
+nginx_cache_sync_nginx_uid: 101
+nginx_cache_sync_nginx_gid: 101
+nginx_cache_sync_skip_if_fresh: false
+nginx_cache_sync_fresh_max_age_hours: 24
+nginx_cache_sync_stamp_path: "{{ infra_bootstrap_repo_state_dir | default('/var/lib/atlas-infra') }}/cache-sync.stamp"
+nginx_cache_sync_services_hold_path: "{{ infra_bootstrap_repo_state_dir | default('/var/lib/atlas-infra') }}/cache-sync-services.held"
+nginx_cache_sync_parallel: false
+nginx_cache_sync_parallel_jobs: 4
+nginx_cache_sync_parallel_timeout_sec: 7200
+nginx_cache_sync_parallel_poll_sec: 5
+
+# Cache-seed knobs validated on localhost (role 14 defaults are not loaded here).
+infra_cache_seed_publish_enabled: false
+infra_cache_seed_load_enabled: false
+infra_cache_seed_publish_image: ""
+infra_cache_seed_publish_tag: ""
+infra_cache_seed_load_image: ""
+infra_cache_seed_load_tag: ""
+infra_cache_seed_publish_include:
+  registry: true
+  helm_repo: true
+  pkg_repo: true
+  custom_www: true
+infra_cache_seed_load_include:
+  registry: true
+  helm_repo: true
+  pkg_repo: true
+  custom_www: true
+infra_cache_seed_publish_registry_user: ""
+infra_cache_seed_publish_registry_password: ""
+infra_cache_seed_load_registry_user: ""
+infra_cache_seed_load_registry_password: ""
+infra_cache_seed_registry_tls_ca_enabled: false
+infra_cache_seed_registry_tls_ca_src: ""
+infra_cache_seed_registry_tls_ca_dir: ""
+infra_cache_seed_registry_tls_ca_validate_certs: false
+infra_cache_seed_include_keys:
+  - registry
+  - helm_repo
+  - pkg_repo
+  - custom_www
+
+# Helm GitHub Releases file-store warm (role 09). Empty list is valid.
+helm_repo_releases_warm_specs: []
+helm_repo_nginx_releases_github_allowlist: []

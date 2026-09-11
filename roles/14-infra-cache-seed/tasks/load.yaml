@@ -1,0 +1,219 @@
+---
+# Cold-path extract: pull seed image and copy selected /seed trees onto host bind-mounts.
+# Outer always restarts from this stop or a leftover hold even when extract is skipped.
+# Skip compares a remote manifest digest (imagetools, no layer pull) when buildx works.
+
+- name: Select infra cache seed load layer
+  ansible.builtin.set_fact:
+    infra_cache_seed_include: "{{ infra_cache_seed_load_include }}"
+    infra_cache_seed_image: "{{ infra_cache_seed_load_image }}"
+    infra_cache_seed_tag: "{{ infra_cache_seed_load_tag }}"
+
+- name: Select infra cache seed load registry credentials
+  ansible.builtin.set_fact:
+    infra_cache_seed_registry_user: "{{ infra_cache_seed_load_registry_user }}"
+    infra_cache_seed_registry_password: "{{ infra_cache_seed_load_registry_password }}"
+  no_log: true
+
+- ansible.builtin.import_tasks: components.yaml
+
+- ansible.builtin.import_tasks: validate.yaml
+
+- ansible.builtin.include_tasks: registry_ca.yaml
+  when: infra_cache_seed_registry_tls_ca_enabled | default(false) | bool
+
+- ansible.builtin.include_tasks: load_services_hold.yaml
+  when: infra_cache_seed_stop_services | default(true) | bool
+
+- name: Infra cache seed load
+  block:
+    - ansible.builtin.include_tasks: login.yaml
+
+    - name: Reset infra cache seed remote digest probe
+      ansible.builtin.set_fact:
+        infra_cache_seed_remote_digest_ok: false
+        infra_cache_seed_repo_digests: []
+        infra_cache_seed_image_digest: ""
+        infra_cache_seed_seed_bytes: 0
+
+    - name: Probe remote infra cache seed manifest digest
+      ansible.builtin.command:
+        argv:
+          - docker
+          - buildx
+          - imagetools
+          - inspect
+          - --format
+          - "{{ '{{' }}.Digest{{ '}}' }}"
+          - "{{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}"
+      register: infra_cache_seed_imagetools
+      changed_when: false
+      failed_when: false
+
+    - name: Accept remote infra cache seed sha256 digest
+      ansible.builtin.set_fact:
+        infra_cache_seed_remote_digest_ok: true
+        infra_cache_seed_image_digest: >-
+          {{
+            (infra_cache_seed_image | string)
+            ~ '@'
+            ~ ((infra_cache_seed_imagetools.stdout | trim | lower).split('@') | last)
+          }}
+        infra_cache_seed_repo_digests:
+          - >-
+            {{
+              (infra_cache_seed_image | string)
+              ~ '@'
+              ~ ((infra_cache_seed_imagetools.stdout | trim | lower).split('@') | last)
+            }}
+      when:
+        - (infra_cache_seed_imagetools.rc | default(1) | int) == 0
+        - >-
+          (infra_cache_seed_imagetools.stdout | default('') | trim | lower).split('@') | last
+          is match('^sha256:[0-9a-f]{64}$')
+
+    - ansible.builtin.include_tasks: check_stamp.yaml
+      when: infra_cache_seed_remote_digest_ok | default(false) | bool
+
+    - name: Pull infra cache seed image
+      when: not (infra_cache_seed_skip_load | default(false) | bool)
+      block:
+        - name: Pull infra cache seed image layers
+          ansible.builtin.command:
+            argv:
+              - docker
+              - pull
+              - "{{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}"
+          async: "{{ infra_cache_seed_load_timeout_sec | int }}"
+          poll: "{{ infra_cache_seed_async_poll_sec | int }}"
+
+        - name: Read infra cache seed RepoDigests
+          ansible.builtin.command:
+            argv:
+              - docker
+              - image
+              - inspect
+              - --format
+              - "{{ '{{' }}json .RepoDigests{{ '}}' }}"
+              - "{{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}"
+          register: infra_cache_seed_inspect
+          changed_when: false
+
+        - name: Parse infra cache seed RepoDigests
+          ansible.builtin.set_fact:
+            infra_cache_seed_repo_digests: "{{ infra_cache_seed_inspect.stdout | from_json }}"
+            infra_cache_seed_image_digest: ""
+
+        - name: Select RepoDigest matching the seed image name
+          ansible.builtin.set_fact:
+            infra_cache_seed_image_digest: "{{ item }}"
+          when: item.split('@') | first == infra_cache_seed_image
+          loop: "{{ infra_cache_seed_repo_digests | default([]) }}"
+          loop_control:
+            label: "{{ item }}"
+
+        - name: Fall back to first RepoDigest when image name did not match
+          ansible.builtin.set_fact:
+            infra_cache_seed_image_digest: "{{ infra_cache_seed_repo_digests[0] }}"
+          when:
+            - (infra_cache_seed_image_digest | default('') | length) == 0
+            - (infra_cache_seed_repo_digests | default([]) | length) > 0
+
+        - name: Require a registry digest after seed pull
+          ansible.builtin.assert:
+            that:
+              - (infra_cache_seed_image_digest | default('') | length) > 0
+              - (infra_cache_seed_repo_digests | default([]) | length) > 0
+            fail_msg: >-
+              Seed image {{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}
+              has no RepoDigests after docker pull.
+
+        - ansible.builtin.include_tasks: check_stamp.yaml
+
+    - name: Infra cache seed extract mutation
+      when: not (infra_cache_seed_skip_load | default(false) | bool)
+      block:
+        - name: Measure infra cache seed /seed bytes
+          ansible.builtin.command:
+            argv:
+              - docker
+              - run
+              - --rm
+              - --entrypoint
+              - du
+              - "{{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}"
+              - -sb
+              - /seed
+          register: infra_cache_seed_du
+          changed_when: false
+
+        - name: Store infra cache seed /seed bytes
+          ansible.builtin.set_fact:
+            infra_cache_seed_seed_bytes: "{{ infra_cache_seed_du.stdout.split() | first | default('0') | int }}"
+
+        - ansible.builtin.include_tasks: validate_disk.yaml
+
+        - name: Read infra cache seed MANIFEST from image
+          ansible.builtin.command:
+            argv:
+              - docker
+              - run
+              - --rm
+              - --entrypoint
+              - cat
+              - "{{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}"
+              - /seed/MANIFEST
+          register: infra_cache_seed_manifest
+          changed_when: false
+
+        - name: Require published MANIFEST to cover load include
+          ansible.builtin.assert:
+            that:
+              - item.name in (infra_cache_seed_manifest.stdout_lines | default([]))
+            fail_msg: >-
+              Seed image {{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}
+              MANIFEST is missing component {{ item.name }}.
+              Load include must be a subset of published components.
+          loop: "{{ infra_cache_seed_components | default([]) }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - ansible.builtin.include_tasks: stop_services.yaml
+          when: infra_cache_seed_stop_services | default(true) | bool
+
+        - ansible.builtin.include_tasks: assert_services_stopped.yaml
+          when: infra_cache_seed_stop_services | default(true) | bool
+
+        - name: Ensure infra cache seed destination directories exist
+          ansible.builtin.file:
+            path: "{{ item.host_dir }}"
+            state: directory
+            mode: "0755"
+          loop: "{{ infra_cache_seed_components | default([]) }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: Ensure infra cache seed work directory exists
+          ansible.builtin.file:
+            path: "{{ infra_cache_seed_work_dir }}"
+            state: directory
+            mode: "0755"
+
+        - name: Render infra cache seed extract script
+          ansible.builtin.template:
+            src: extract.sh.j2
+            dest: "{{ infra_cache_seed_work_dir }}/extract.sh"
+            mode: "0755"
+
+        - ansible.builtin.include_tasks: extract.yaml
+
+        - ansible.builtin.include_tasks: fix_ownership.yaml
+
+        - ansible.builtin.include_tasks: write_stamp.yaml
+  always:
+    - name: Infra cache seed load cleanup
+      block:
+        - ansible.builtin.include_tasks: restart_services.yaml
+          when: infra_cache_seed_stop_services | default(true) | bool
+      always:
+        - ansible.builtin.include_tasks: logout.yaml

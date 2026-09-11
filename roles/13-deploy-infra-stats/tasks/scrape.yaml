@@ -1,0 +1,14 @@
+---
+# Scrape/render for infra-stats lives in templates/refresh_infra_stats.py.j2
+# (invoked by refresh-infra-stats.sh from publish.yaml and cron).
+#
+# Soft-fail / stale / gate-off / annotate / chronyc 4.6 CSV / badger DER scan
+# contracts are implemented there. This file documents the former scrape.yaml
+# entrypoint so role layout stays discoverable.
+
+- name: Infra-stats scrape is implemented by refresh_infra_stats.py
+  ansible.builtin.debug:
+    msg: >-
+      BIND/NTP/certs scrape + HTML/JSON render run via
+      {{ infra_stats_compose_project_dir }}/refresh_infra_stats.py
+      (see publish.yaml and infra-stats-refresh cron).

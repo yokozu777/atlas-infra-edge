@@ -1,0 +1,92 @@
+worker_processes auto;
+error_log /var/log/nginx/error.log warn;
+pid /var/run/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    server_names_hash_bucket_size 128;
+    server_names_hash_max_size 2048;
+
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$host" $upstream_cache_status';
+    access_log /var/log/nginx/access.log main;
+
+    sendfile on;
+    keepalive_timeout 65;
+    client_max_body_size 0;
+
+    # Force IPv4 for variable proxy_pass upstreams (pkg-repo CDN mirrors).
+    # Used by pkg-repo-vhosts.conf set $pkg_repo_upstream + proxy_pass $….
+{% if dns_server_ip is defined and (dns_server_ip | string | length) > 0 %}
+    resolver {{ dns_server_ip }} ipv4=on ipv6=off valid=300s;
+{% else %}
+    resolver 1.1.1.1 8.8.8.8 ipv4=on ipv6=off valid=300s;
+{% endif %}
+    resolver_timeout 5s;
+
+{% if setup_apt_rpm_nginx | default(false) | bool and pkg_repo_nginx_shared_with_registry | default(true) | bool %}
+    map $uri $pkg_repo_skip_metadata_cache {
+        default 0;
+        ~^/dists/.+/(InRelease|Release|Release\.gpg)$ 1;
+    }
+
+    proxy_cache_path /var/cache/nginx/pkg-repo/metadata levels=1:2 keys_zone=pkg_repo_metadata_cache:50m max_size={{ pkg_repo_nginx_cache_metadata_max_size }} inactive=1d use_temp_path=off;
+    proxy_cache_path /var/cache/nginx/pkg-repo/blobs levels=1:2 keys_zone=pkg_repo_blob_cache:200m max_size={{ pkg_repo_nginx_cache_blobs_max_size }} inactive=30d use_temp_path=off;
+    include /etc/nginx/pkg-repo-vhosts/pkg-repo-vhosts.conf;
+{% endif %}
+
+{% if setup_helm_nginx | default(false) | bool and helm_repo_nginx_shared_with_registry | default(true) | bool %}
+    proxy_cache_path /var/cache/nginx/helm-repo levels=1:2 keys_zone=helm_repo_cache:100m max_size={{ helm_repo_nginx_cache_max_size }} inactive=7d use_temp_path=off;
+    include /etc/nginx/helm-repo-vhosts/helm-repo-vhosts.conf;
+{% endif %}
+
+{% if setup_custom_content_nginx | default(false) | bool and custom_nginx_shared_with_registry | default(true) | bool %}
+    include /etc/nginx/custom-nginx-vhosts/custom-nginx-vhosts.conf;
+{% endif %}
+
+{% if setup_infra_stats | default(false) | bool and infra_stats_shared_with_registry | default(true) | bool %}
+    include /etc/nginx/infra-stats-vhosts/infra-stats-vhosts.conf;
+{% endif %}
+
+    {% for proxy in registry_proxy_upstreams %}
+    server {
+        listen 443 ssl;
+        server_name {{ proxy.proxy_hostname }};
+
+        ssl_certificate /etc/nginx/certs/{{ registry_tls_cert_filename }};
+        ssl_certificate_key /etc/nginx/certs/{{ registry_tls_key_filename }};
+        ssl_protocols TLSv1.2 TLSv1.3;
+
+        location / {
+            proxy_pass http://registry-{{ proxy.service_name }}:{{ registry_container_port }};
+            proxy_set_header Host {{ proxy.upstream_host }};
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_buffering off;
+            proxy_read_timeout 900s;
+            proxy_send_timeout 900s;
+        }
+    }
+    {% endfor %}
+
+    server {
+        listen 443 ssl default_server;
+        server_name {{ registry_host }};
+
+        ssl_certificate /etc/nginx/certs/{{ registry_tls_cert_filename }};
+        ssl_certificate_key /etc/nginx/certs/{{ registry_tls_key_filename }};
+        ssl_protocols TLSv1.2 TLSv1.3;
+
+        location / {
+            return 404;
+        }
+    }
+}

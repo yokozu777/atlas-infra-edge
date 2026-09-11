@@ -1,0 +1,61 @@
+---
+# Optional runtime helpers (not imported from thin main.yaml).
+# Canonical path: render → mark_pending → compose_reconcile.
+
+- name: Check registry nginx container state for custom nginx vhost reload
+  ansible.builtin.command:
+    cmd: docker inspect -f '{{ "{{" }}.State.Running{{ "}}" }}' {{ registry_nginx_container_name }}
+  register: registry_nginx_container_running
+  changed_when: false
+  failed_when: false
+  when:
+    - custom_nginx_vhosts_deployed.changed | default(false)
+    - custom_nginx_shared_with_registry | default(true) | bool
+    - setup_registry_nginx | default(false) | bool
+
+- name: Reload shared registry nginx after custom nginx vhost change
+  ansible.builtin.command:
+    cmd: docker exec {{ registry_nginx_container_name }} nginx -s reload
+  register: custom_nginx_registry_reloaded
+  changed_when: custom_nginx_registry_reloaded.rc == 0
+  failed_when: false
+  when:
+    - custom_nginx_vhosts_deployed.changed | default(false)
+    - custom_nginx_shared_with_registry | default(true) | bool
+    - setup_registry_nginx | default(false) | bool
+    - registry_nginx_container_running.stdout | default('false') == 'true'
+
+- name: Restart shared registry nginx after custom nginx change when stack is pending restart
+  ansible.builtin.command:
+    cmd: docker compose up -d --remove-orphans --force-recreate
+    chdir: "{{ registry_nginx_compose_project_dir }}"
+  register: custom_nginx_registry_recreated
+  changed_when: custom_nginx_registry_recreated.rc == 0
+  when:
+    - custom_nginx_vhosts_deployed.changed | default(false)
+      or custom_nginx_tls_cert_issued.changed | default(false)
+      or custom_nginx_issue_script_deployed.changed | default(false)
+    - custom_nginx_shared_with_registry | default(true) | bool
+    - setup_registry_nginx | default(false) | bool
+    - ansible_facts.get('compose_stacks_pending_restart', []) | intersect([compose_systemd_registry_nginx_unit_name]) | length > 0
+
+- name: Check registry nginx compose project for custom nginx vhost restart
+  ansible.builtin.stat:
+    path: "{{ registry_nginx_compose_project_dir }}/docker-compose.yml"
+  register: registry_nginx_compose_project
+  when:
+    - custom_nginx_vhosts_deployed.changed | default(false)
+    - custom_nginx_shared_with_registry | default(true) | bool
+    - setup_registry_nginx | default(false) | bool
+    - registry_nginx_container_running.stdout | default('false') != 'true'
+
+- name: Restart shared registry nginx compose after custom nginx vhost change when container is down
+  ansible.builtin.systemd:
+    name: "{{ compose_systemd_registry_nginx_unit_name }}.service"
+    state: restarted
+  when:
+    - custom_nginx_vhosts_deployed.changed | default(false)
+    - custom_nginx_shared_with_registry | default(true) | bool
+    - setup_registry_nginx | default(false) | bool
+    - registry_nginx_container_running.stdout | default('false') != 'true'
+    - registry_nginx_compose_project.stat.exists | default(false)

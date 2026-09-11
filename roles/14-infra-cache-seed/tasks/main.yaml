@@ -1,0 +1,8 @@
+---
+# No combined entry. Playbook uses tasks_from=load.yaml or publish.yaml.
+- name: Refuse bare include of 14-infra-cache-seed
+  ansible.builtin.fail:
+    msg: >-
+      14-infra-cache-seed has no combined main path.
+      Use tasks_from=load.yaml or tasks_from=publish.yaml
+      (--tags 14_infra_cache_seed_load / 14_infra_cache_seed_publish).

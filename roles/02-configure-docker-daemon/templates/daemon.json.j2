@@ -1,0 +1,11 @@
+{
+{% if ansible_facts['distribution'] == 'OracleLinux' %}
+    "selinux-enabled": {{ docker_daemon_selinux_enabled | default(false) | bool | to_json }},
+{% endif %}
+{% if use_internal_docker_registry | default('none') == 'harbor' %}
+    "registry-mirrors": ["https://{{ harbor_host }}"]
+{% else %}
+    {# Infra runs pull-through registry; Docker on this host pulls from upstream directly. #}
+    "registry-mirrors": []
+{% endif %}
+}

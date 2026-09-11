@@ -1,0 +1,25 @@
+---
+# Map extracted nginx cache/www trees to the runtime nginx uid/gid (alpine = 101:101).
+# Dockerfile COPY stores files as root in the seed image; extract cp -a keeps that.
+# registry:3.1.1 runs as root — do not chown registry blobs. Site images that drop
+# privileges need an overlay uid/gid, not this role.
+
+- name: Build extracted nginx cache directories for ownership fix
+  ansible.builtin.set_fact:
+    infra_cache_seed_nginx_dirs: >-
+      {{
+        infra_cache_seed_components
+        | default([])
+        | selectattr('nginx', 'equalto', true)
+        | map(attribute='host_dir')
+        | list
+      }}
+
+- name: Fix nginx cache and static content ownership after seed load
+  ansible.builtin.file:
+    path: "{{ item }}"
+    owner: "{{ infra_cache_seed_nginx_uid | int }}"
+    group: "{{ infra_cache_seed_nginx_gid | int }}"
+    recurse: true
+  loop: "{{ infra_cache_seed_nginx_dirs | default([]) }}"
+  when: (infra_cache_seed_nginx_dirs | default([]) | length) > 0

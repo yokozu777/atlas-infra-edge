@@ -1,0 +1,22 @@
+---
+# Override these knobs via inventory / group_vars when needed.
+
+# Optional override for cron systemd unit (empty = auto: crond on RedHat, cron on Debian).
+pkg_repo_tls_cron_systemd_unit_override: ""
+
+setup_pkg_repo_nginx: false
+
+# Metadata cache warm (role 08 warm_cache.yaml / reconcile)
+pkg_repo_nginx_cache_warm_enabled: true
+# light = InRelease/repomd only (deploy-safe); full = + Packages/primary.xml.gz
+pkg_repo_nginx_cache_warm_mode: light
+pkg_repo_nginx_cache_warm_timeout: 300
+pkg_repo_nginx_cache_warm_wait_retries: 60
+pkg_repo_nginx_cache_warm_wait_delay: 5
+pkg_repo_nginx_cache_warm_curl_connect_timeout: 5
+pkg_repo_nginx_cache_warm_curl_max_time: 60
+
+# Upstream proxy timeouts (variable proxy_pass + IPv4 resolver)
+pkg_repo_nginx_proxy_connect_timeout: 10s
+pkg_repo_nginx_proxy_read_timeout: 120s
+pkg_repo_nginx_proxy_send_timeout: 120s

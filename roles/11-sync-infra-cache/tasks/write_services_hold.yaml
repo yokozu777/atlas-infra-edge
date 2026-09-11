@@ -1,0 +1,49 @@
+---
+# Persist which cache-sync services must be restarted after stop/rsync.
+# Survives a failed play so the next sync can heal inactive units without
+# treating them as cold-path (never started).
+
+- name: Ensure infra cache sync services hold parent directory exists
+  ansible.builtin.file:
+    path: "{{ nginx_cache_sync_services_hold_path | dirname }}"
+    state: directory
+    mode: "0755"
+  when: >-
+    (nginx_cache_sync_stopped_registry | default(false) | bool)
+    or (nginx_cache_sync_stopped_registry_nginx | default(false) | bool)
+    or (nginx_cache_sync_stopped_pkg_repo_nginx | default(false) | bool)
+    or (nginx_cache_sync_stopped_helm_repo_nginx | default(false) | bool)
+    or (nginx_cache_sync_stopped_custom_nginx | default(false) | bool)
+
+- name: Write infra cache sync services hold after stop
+  ansible.builtin.copy:
+    dest: "{{ nginx_cache_sync_services_hold_path }}"
+    mode: "0644"
+    content: "{{ nginx_cache_sync_services_hold_doc | to_nice_yaml(indent=2) }}"
+  vars:
+    nginx_cache_sync_services_hold_doc:
+      version: 1
+      registry: "{{ nginx_cache_sync_stopped_registry | default(false) | bool }}"
+      registry_nginx: "{{ nginx_cache_sync_stopped_registry_nginx | default(false) | bool }}"
+      pkg_repo_nginx: "{{ nginx_cache_sync_stopped_pkg_repo_nginx | default(false) | bool }}"
+      helm_repo_nginx: "{{ nginx_cache_sync_stopped_helm_repo_nginx | default(false) | bool }}"
+      custom_nginx: "{{ nginx_cache_sync_stopped_custom_nginx | default(false) | bool }}"
+  when: >-
+    (nginx_cache_sync_stopped_registry | default(false) | bool)
+    or (nginx_cache_sync_stopped_registry_nginx | default(false) | bool)
+    or (nginx_cache_sync_stopped_pkg_repo_nginx | default(false) | bool)
+    or (nginx_cache_sync_stopped_helm_repo_nginx | default(false) | bool)
+    or (nginx_cache_sync_stopped_custom_nginx | default(false) | bool)
+
+- name: Clear infra cache sync services hold when nothing was stopped
+  ansible.builtin.file:
+    path: "{{ nginx_cache_sync_services_hold_path }}"
+    state: absent
+  when: >-
+    not (
+      (nginx_cache_sync_stopped_registry | default(false) | bool)
+      or (nginx_cache_sync_stopped_registry_nginx | default(false) | bool)
+      or (nginx_cache_sync_stopped_pkg_repo_nginx | default(false) | bool)
+      or (nginx_cache_sync_stopped_helm_repo_nginx | default(false) | bool)
+      or (nginx_cache_sync_stopped_custom_nginx | default(false) | bool)
+    )

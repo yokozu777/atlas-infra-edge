@@ -1,0 +1,70 @@
+---
+# Issue/refresh infra-stats TLS via step-ca. Requires provisioned CA.
+
+- name: Require provisioned step-ca for infra-stats TLS
+  ansible.builtin.assert:
+    that:
+      - stepca_provisioned_for_infra_stats_tls is defined
+      - stepca_provisioned_for_infra_stats_tls.stat.exists | default(false)
+    fail_msg: >-
+      step-ca is not provisioned yet (missing {{ stepca_provisioned_marker }}).
+      Cold path: compose_start_core must finish before compose_start_registry.
+  when: infra_stats_tls_enabled | default(false) | bool
+
+- name: Check infra-stats TLS certificate file
+  ansible.builtin.stat:
+    path: "{{ infra_stats_tls_dir }}/{{ infra_stats_tls_cert_filename }}"
+  register: infra_stats_tls_cert_stat
+  when: infra_stats_tls_enabled | default(false) | bool
+
+- name: Check infra-stats TLS SAN coverage
+  ansible.builtin.command:
+    cmd: >-
+      openssl x509 -in {{ infra_stats_tls_dir }}/{{ infra_stats_tls_cert_filename }}
+      -noout -ext subjectAltName
+  register: infra_stats_tls_cert_sans
+  changed_when: false
+  when:
+    - infra_stats_tls_enabled | default(false) | bool
+    - infra_stats_tls_cert_stat.stat.exists | default(false)
+
+- name: Remove infra-stats TLS certificate when SAN coverage is outdated
+  ansible.builtin.file:
+    path: "{{ infra_stats_tls_dir }}/{{ infra_stats_tls_cert_filename }}"
+    state: absent
+  register: infra_stats_tls_cert_removed
+  when:
+    - infra_stats_tls_enabled | default(false) | bool
+    - infra_stats_tls_cert_stat.stat.exists | default(false)
+    - (infra_stats_hostname | string) not in (infra_stats_tls_cert_sans.stdout | default(''))
+
+- name: Issue initial infra-stats TLS certificate when missing
+  ansible.builtin.command:
+    cmd: "{{ infra_stats_compose_project_dir }}/issue-infra-stats-tls-cert.sh"
+  register: infra_stats_tls_cert_issued
+  when:
+    - infra_stats_tls_enabled | default(false) | bool
+    - not infra_stats_tls_cert_stat.stat.exists | default(false)
+      or (infra_stats_tls_cert_removed is defined and infra_stats_tls_cert_removed.changed | default(false))
+  no_log: true
+  changed_when: infra_stats_tls_cert_issued.rc == 0
+
+- name: Re-check infra-stats TLS files after issue
+  ansible.builtin.stat:
+    path: "{{ infra_stats_tls_dir }}/{{ item }}"
+  loop:
+    - "{{ infra_stats_tls_cert_filename }}"
+    - "{{ infra_stats_tls_key_filename }}"
+  register: infra_stats_tls_files_stat
+  when: infra_stats_tls_enabled | default(false) | bool
+
+- name: Set infra-stats TLS file permissions
+  ansible.builtin.file:
+    path: "{{ item.stat.path }}"
+    mode: "{{ '0644' if item.item == infra_stats_tls_cert_filename else '0600' }}"
+  loop: "{{ infra_stats_tls_files_stat.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item | default('') }}"
+  when:
+    - infra_stats_tls_enabled | default(false) | bool
+    - item.stat.exists | default(false)

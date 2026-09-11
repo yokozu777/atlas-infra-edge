@@ -1,0 +1,14 @@
+#!/bin/sh
+# Copy selected /seed trees onto host bind-mounts under /out.
+set -eu
+need() {
+  if [ ! -d "/seed/$1" ]; then
+    echo "infra-cache-seed: image missing /seed/$1 (check MANIFEST vs load include)" >&2
+    exit 1
+  fi
+}
+{% for item in infra_cache_seed_components | default([]) %}
+need {{ item.seed_dir | quote }}
+mkdir -p /out/{{ item.seed_dir }}
+cp -a /seed/{{ item.seed_dir }}/. /out/{{ item.seed_dir }}/
+{% endfor %}

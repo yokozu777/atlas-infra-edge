@@ -1,0 +1,22 @@
+# Example inventory for ./run.sh.
+# Copy to inventory.yml (gitignored) and edit addresses / hostnames:
+#   cp inventory-example.yml inventory.yml
+#
+# Required group (default name). Must be non-empty:
+# - infra_platform — Docker + compose edge services (BIND, step-ca, registry, caches)
+#
+# Override the group name via group_vars if needed:
+#   infra_platform_hosts: my_infra_nodes
+#
+# Set hostname: on each host when roles need a stable FQDN (DNS / TLS SANs).
+
+all:
+  children:
+    infra_platform:
+      hosts:
+        infra01:
+          ansible_host: 192.0.2.10
+          hostname: infra01.example.com
+        # infra02:
+        #   ansible_host: 192.0.2.11
+        #   hostname: infra02.example.com

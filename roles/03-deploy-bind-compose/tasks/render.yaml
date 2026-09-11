@@ -1,0 +1,431 @@
+---
+# Phase 1 render: zones/config/compose files + mark_pending.
+# No docker pull, no stack start/restart, no resolver (see post_start.yaml).
+
+- name: Ensure bind config directory exists
+  ansible.builtin.file:
+    path: "{{ bind_config_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Ensure bind zones directory exists
+  ansible.builtin.file:
+    path: "{{ bind_zones_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Derive BIND search domain and apex zone id
+  ansible.builtin.set_fact:
+    bind_search_domain: >-
+      {{
+        bind_zones.apex.name
+        if (bind_zones.apex is defined and bind_zones.apex.name is defined)
+        else (bind_zones | dict2items | map(attribute='value.name') | list | first)
+      }}
+    bind_apex_zone_id: >-
+      {{
+        'apex'
+        if (bind_zones.apex is defined)
+        else (
+          bind_zones | dict2items
+          | selectattr('value.inventory_a_records', 'defined')
+          | selectattr('value.inventory_a_records')
+          | map(attribute='key')
+          | list
+          | first
+          | default('')
+        )
+      }}
+
+- name: Derive BIND inventory / sibling zone names
+  ansible.builtin.set_fact:
+    bind_inventory_zone_name: >-
+      {{
+        bind_zones[bind_apex_zone_id].name
+        if (bind_apex_zone_id | length > 0 and bind_zones[bind_apex_zone_id] is defined)
+        else bind_search_domain
+      }}
+    bind_sibling_zone_names: >-
+      {{
+        bind_zones | dict2items
+        | map(attribute='value.name')
+        | reject('equalto', (
+          bind_zones[bind_apex_zone_id].name
+          if (bind_apex_zone_id | length > 0 and bind_zones[bind_apex_zone_id] is defined)
+          else bind_search_domain
+        ))
+        | list
+      }}
+
+- name: Load cluster hosts for bind apex zone records
+  ansible.builtin.include_vars:
+    file: "{{ bind_hosts_file }}"
+    name: bind_cluster_hosts
+  when:
+    - bind_hosts_file | default('') | length > 0
+    - bind_apex_zone_id | length > 0
+    - (bind_zones[bind_apex_zone_id].inventory_a_records | default(false) | bool)
+
+- name: Collect apex A records from inventory
+  ansible.builtin.set_fact:
+    bind_apex_inventory_a_records: >-
+      {{
+        bind_apex_inventory_a_records | default([])
+        + [{
+          'name': host_entry.value.hostname | replace('.' ~ bind_inventory_zone_name, ''),
+          'type': 'A',
+          'rdata': host_entry.key | string
+        }]
+      }}
+  loop: >-
+    {{
+      bind_cluster_hosts.all.children.values()
+      | map(attribute='hosts', default={})
+      | map('dict2items')
+      | flatten
+    }}
+  loop_control:
+    loop_var: host_entry
+  when:
+    - bind_hosts_file | default('') | length > 0
+    - bind_apex_zone_id | length > 0
+    - (bind_zones[bind_apex_zone_id].inventory_a_records | default(false) | bool)
+    - host_entry.value.hostname is defined
+    - >
+      (
+        host_entry.value.hostname == bind_inventory_zone_name
+        or host_entry.value.hostname.endswith('.' ~ bind_inventory_zone_name)
+      )
+    - >
+      (
+        (bind_sibling_zone_names | length) == 0
+        or (
+          host_entry.value.hostname | regex_search(
+            '(^|\\.)(' ~ (bind_sibling_zone_names | map('regex_escape') | join('|')) ~ ')$'
+          ) is none
+        )
+      )
+
+- name: Detect conflicting apex A records for the same hostname
+  ansible.builtin.assert:
+    that:
+      - item.1 | map(attribute='rdata') | unique | length <= 1
+    fail_msg: >-
+      Conflicting A records for {{ item.0 }}:
+      {{ item.1 | map(attribute='rdata') | list | join(', ') }}
+  loop: "{{ bind_apex_inventory_a_records | default([]) | groupby('name') }}"
+  loop_control:
+    label: "{{ item.0 }}"
+  when: (bind_apex_inventory_a_records | default([]) | length) > 0
+
+- name: Deduplicate apex A records by hostname
+  ansible.builtin.set_fact:
+    bind_apex_inventory_a_records: >-
+      {{
+        bind_apex_inventory_a_records | default([])
+        | groupby('name')
+        | map('last')
+        | map('first')
+        | list
+      }}
+  when: (bind_apex_inventory_a_records | default([]) | length) > 0
+
+- name: Resolve mode-specific apex DNS records for container registries
+  ansible.builtin.set_fact:
+    bind_apex_mode_dns_records: >-
+      {{
+        bind_apex_static_records_registry | default([])
+        if (use_internal_docker_registry | default('none')) == 'registry'
+        else (
+          bind_apex_static_records_harbor | default([])
+          if (
+            (use_internal_docker_registry | default('none')) == 'harbor'
+            and harbor_dns_ip | default('') | length > 0
+          )
+          else []
+        )
+      }}
+
+- name: Resolve pkg-repo nginx apex DNS records
+  ansible.builtin.set_fact:
+    bind_apex_repo_dns_records: >-
+      {{
+        bind_apex_static_records_repo | default([])
+        if (setup_apt_rpm_nginx | default(false) | bool)
+        else []
+      }}
+
+- name: Resolve helm-repo nginx apex DNS records
+  ansible.builtin.set_fact:
+    bind_apex_helm_dns_records: >-
+      {{
+        bind_apex_static_records_helm | default([])
+        if (setup_helm_nginx | default(false) | bool)
+        else []
+      }}
+
+- name: Resolve custom nginx apex DNS records
+  ansible.builtin.set_fact:
+    bind_apex_static_dns_records: >-
+      {{
+        bind_apex_static_records_static | default([])
+        if (setup_custom_content_nginx | default(false) | bool)
+        else []
+      }}
+
+- name: Resolve infra-stats apex DNS records
+  ansible.builtin.set_fact:
+    bind_apex_stats_dns_records: >-
+      {{
+        bind_apex_static_records_stats | default([])
+        if (setup_infra_stats | default(false) | bool)
+        else []
+      }}
+
+- name: Merge apex zone records
+  ansible.builtin.set_fact:
+    bind_merged_apex_records: >-
+      {{
+        (
+          (bind_zones[bind_apex_zone_id].static_records | default([]))
+          + (bind_apex_static_records | default([]))
+          + bind_apex_mode_dns_records | default([])
+          + bind_apex_repo_dns_records | default([])
+          + bind_apex_helm_dns_records | default([])
+          + bind_apex_static_dns_records | default([])
+          + bind_apex_stats_dns_records | default([])
+          + bind_apex_inventory_a_records | default([])
+        )
+        | unique(attribute='name')
+      }}
+  when: bind_apex_zone_id | length > 0
+
+- name: Merge k8s control plane LB apex A record
+  ansible.builtin.set_fact:
+    bind_merged_apex_records: >-
+      {{
+        (
+          bind_merged_apex_records | default([])
+          | rejectattr('name', 'equalto', k8s_lb_hostname)
+          | list
+          + [{
+            'name': k8s_lb_hostname,
+            'type': 'A',
+            'rdata': vip_address | string
+          }]
+        )
+        | unique(attribute='name')
+      }}
+  when:
+    - bind_apex_zone_id | length > 0
+    - k8s_lb_hostname | default('') | length > 0
+    - vip_address | default('') | length > 0
+    # When true, atlas-k8s-core role 09_lb_vip_dns owns this A via Terraform RFC2136.
+    - not (k8s_lb_dns_tf_manage_a_record | default(false) | bool)
+
+# RFC2136 (09_lb_vip_dns, external-dns) lives in .jnl. Rewriting .db and
+# deleting journals on every compose_render drops kubelb / k8s.* names.
+# Skip zone rewrite when templated static records are unchanged.
+- name: Compute BIND static records fingerprint
+  ansible.builtin.set_fact:
+    bind_records_fingerprint: >-
+      {{
+        bind_zones
+        | bind_static_fingerprint(
+            bind_merged_apex_records | default([]),
+            bind_apex_zone_id
+          )
+      }}
+
+- name: Read previous BIND static records fingerprint
+  ansible.builtin.slurp:
+    path: "{{ bind_records_hash_file }}"
+  register: bind_records_hash_slurp
+  failed_when: false
+
+- name: Decide whether BIND zone files need rewrite
+  ansible.builtin.set_fact:
+    bind_zone_files_need_rewrite: >-
+      {{
+        (bind_records_hash_slurp.content | b64decode | trim)
+        != bind_records_fingerprint
+        if bind_records_hash_slurp.content is defined
+        else true
+      }}
+
+- name: Check whether BIND container is running
+  ansible.builtin.command:
+    cmd: >-
+      docker inspect -f '{{ "{{" }}.State.Running{{ "}}" }}'
+      {{ bind_container_name }}
+  register: bind_container_running_cmd
+  changed_when: false
+  failed_when: false
+
+- name: Set BIND container running fact
+  ansible.builtin.set_fact:
+    bind_container_running: >-
+      {{
+        bind_container_running_cmd.rc | default(1) | int == 0
+        and (bind_container_running_cmd.stdout | default('') | trim == 'true')
+      }}
+
+- name: Rewrite BIND zone files preserving RFC2136 journals
+  when: bind_zone_files_need_rewrite | bool
+  block:
+    - name: Freeze BIND zones so journals dump into zone files
+      ansible.builtin.command:
+        cmd: docker exec {{ bind_container_name }} rndc freeze {{ item.value.name }}
+      loop: "{{ bind_zones | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}={{ item.value.name }}"
+      register: bind_rndc_freeze
+      failed_when: bind_rndc_freeze.rc != 0
+      when: bind_container_running | bool
+
+    - name: Slurp existing BIND zone files
+      ansible.builtin.slurp:
+        path: "{{ bind_zones_dir }}/{{ item.value.name }}.db"
+      loop: "{{ bind_zones | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}={{ item.value.name }}"
+      register: bind_existing_zone_files
+      failed_when: false
+
+    - name: Read bind zone serial state
+      ansible.builtin.slurp:
+        path: "{{ bind_serial_state_file }}"
+      register: bind_serial_state_slurp
+      failed_when: false
+
+    - name: Compute bind zone serial
+      ansible.builtin.set_fact:
+        bind_zone_serial: >-
+          {%- set today = ansible_facts['date_time']['date'] | replace('-', '') -%}
+          {%- set prev = (bind_serial_state_slurp.content | b64decode | trim) if bind_serial_state_slurp.content is defined else '' -%}
+          {%- set prev_day = prev[:8] if prev | length >= 10 else '' -%}
+          {%- set prev_counter = (prev[8:] | int) if prev | length >= 10 else 0 -%}
+          {%- if prev_day == today -%}
+          {{- today ~ '%02d' | format([prev_counter + 1, 99] | min) -}}
+          {%- else -%}
+          {{- today ~ '01' -}}
+          {%- endif -%}
+
+    - name: Deploy bind zone files
+      ansible.builtin.template:
+        src: zone.db.j2
+        dest: "{{ bind_zones_dir }}/{{ item.value.name }}.db"
+        mode: "0644"
+      loop: "{{ bind_zones | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}={{ item.value.name }}"
+      vars:
+        bind_zone_records: >-
+          {{
+            (
+              bind_merged_apex_records | default([])
+              if (item.key == bind_apex_zone_id)
+              else (item.value.static_records | default([]))
+            )
+            | bind_union_zone_records(
+                bind_existing_zone_files | bind_slurp_zone_text(item.key),
+                item.value.name
+              )
+          }}
+      register: bind_zones_deployed
+
+    - name: Find stale BIND dynamic update journal files
+      ansible.builtin.find:
+        paths: "{{ bind_zones_dir }}"
+        patterns: "*.jnl"
+      register: bind_stale_journals
+      when: not (bind_container_running | bool)
+
+    - name: Remove stale BIND journal files
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ bind_stale_journals.files | default([]) }}"
+      when:
+        - not (bind_container_running | bool)
+        - (bind_stale_journals.matched | default(0) | int) > 0
+
+    - name: Persist bind zone serial after deployment
+      ansible.builtin.copy:
+        dest: "{{ bind_serial_state_file }}"
+        content: "{{ bind_zone_serial }}\n"
+        mode: "0644"
+
+    - name: Persist BIND static records fingerprint
+      ansible.builtin.copy:
+        dest: "{{ bind_records_hash_file }}"
+        content: "{{ bind_records_fingerprint }}\n"
+        mode: "0644"
+  always:
+    - name: Thaw BIND zones after rewrite
+      ansible.builtin.command:
+        cmd: docker exec {{ bind_container_name }} rndc thaw {{ item.value.name }}
+      loop: "{{ bind_zones | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}={{ item.value.name }}"
+      register: bind_rndc_thaw
+      failed_when: false
+      changed_when: bind_rndc_thaw.rc == 0
+      when:
+        - bind_zone_files_need_rewrite | bool
+        - bind_container_running | bool
+
+- name: Set BIND zones directory ownership for named runtime user
+  ansible.builtin.file:
+    path: "{{ bind_zones_dir }}"
+    state: directory
+    owner: "{{ bind_named_uid }}"
+    group: "{{ bind_named_gid }}"
+    mode: "0775"
+
+- name: Set BIND zone file ownership for named runtime user
+  ansible.builtin.file:
+    path: "{{ bind_zones_dir }}/{{ item.value.name }}.db"
+    state: file
+    owner: "{{ bind_named_uid }}"
+    group: "{{ bind_named_gid }}"
+    mode: "0644"
+  loop: "{{ bind_zones | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}={{ item.value.name }}"
+
+- name: Deploy bind named.conf
+  ansible.builtin.template:
+    src: named.conf.j2
+    dest: "{{ bind_named_conf_path }}"
+    mode: "0644"
+  register: bind_named_conf_deployed
+
+- name: Ensure bind compose project directory exists
+  ansible.builtin.file:
+    path: "{{ bind_compose_project_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Deploy bind docker compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ bind_compose_project_dir }}/docker-compose.yml"
+    mode: "0644"
+  register: bind_compose_deployed
+
+- name: Mark bind stack pending restart after configuration change
+  ansible.builtin.include_role:
+    name: 06-enable-compose-systemd
+    tasks_from: mark_compose_pending_restart.yaml
+  vars:
+    compose_pending_restart_units:
+      - "{{ compose_systemd_bind_unit_name }}"
+  when: >-
+    bind_named_conf_deployed.changed | default(false) or
+    bind_compose_deployed.changed | default(false) or
+    (
+      not (bind_container_running | default(false) | bool)
+      and (bind_zones_deployed.results | default([]) | selectattr('changed') | list | length > 0)
+    )
+

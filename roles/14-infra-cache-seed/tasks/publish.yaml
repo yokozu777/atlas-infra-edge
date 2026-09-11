@@ -1,0 +1,112 @@
+---
+# Donor: stop stacks, pack enabled /opt trees into an OCI image, push to an
+# external registry. Runs after compose_reconcile so caches already exist.
+
+- name: Select infra cache seed publish layer
+  ansible.builtin.set_fact:
+    infra_cache_seed_include: "{{ infra_cache_seed_publish_include }}"
+    infra_cache_seed_image: "{{ infra_cache_seed_publish_image }}"
+    infra_cache_seed_tag: "{{ infra_cache_seed_publish_tag }}"
+    infra_cache_seed_publish_use_staging: false
+
+- name: Select infra cache seed publish registry credentials
+  ansible.builtin.set_fact:
+    infra_cache_seed_registry_user: "{{ infra_cache_seed_publish_registry_user }}"
+    infra_cache_seed_registry_password: "{{ infra_cache_seed_publish_registry_password }}"
+  no_log: true
+
+- ansible.builtin.import_tasks: components.yaml
+
+- ansible.builtin.import_tasks: validate.yaml
+
+- ansible.builtin.include_tasks: registry_ca.yaml
+  when: infra_cache_seed_registry_tls_ca_enabled | default(false) | bool
+
+- name: Infra cache seed publish mutation
+  block:
+    - name: Publish disk check uses dest min_free_gb only
+      ansible.builtin.set_fact:
+        infra_cache_seed_seed_bytes: 0
+
+    - ansible.builtin.include_tasks: validate_disk.yaml
+
+    - name: Pull infra cache seed builder image
+      ansible.builtin.command:
+        argv:
+          - docker
+          - pull
+          - "{{ infra_cache_seed_builder_image }}"
+      async: "{{ infra_cache_seed_publish_timeout_sec | int }}"
+      poll: "{{ infra_cache_seed_async_poll_sec | int }}"
+
+    - ansible.builtin.include_tasks: login.yaml
+
+    - ansible.builtin.include_tasks: stop_services.yaml
+      when: infra_cache_seed_stop_services | default(true) | bool
+
+    - ansible.builtin.include_tasks: assert_services_stopped.yaml
+      when: infra_cache_seed_stop_services | default(true) | bool
+
+    - name: Ensure infra cache seed work directory exists
+      ansible.builtin.file:
+        path: "{{ infra_cache_seed_work_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Render infra cache seed MANIFEST
+      ansible.builtin.template:
+        src: MANIFEST.j2
+        dest: "{{ infra_cache_seed_work_dir }}/MANIFEST"
+        mode: "0644"
+
+    - name: Render infra cache seed Dockerfile (BuildKit contexts)
+      ansible.builtin.template:
+        src: Dockerfile.j2
+        dest: "{{ infra_cache_seed_work_dir }}/Dockerfile"
+        mode: "0644"
+
+    - ansible.builtin.include_tasks: build_argv.yaml
+
+    - name: Build infra cache seed image with BuildKit contexts
+      ansible.builtin.command:
+        argv: "{{ infra_cache_seed_build_argv }}"
+      environment:
+        DOCKER_BUILDKIT: "1"
+      async: "{{ infra_cache_seed_publish_timeout_sec | int }}"
+      poll: "{{ infra_cache_seed_async_poll_sec | int }}"
+      register: infra_cache_seed_buildkit
+      failed_when: false
+
+    - name: Fall back to staging copy when BuildKit contexts fail
+      ansible.builtin.include_tasks: build_staging.yaml
+      when: infra_cache_seed_buildkit.rc | default(1) != 0
+
+    - name: Require infra cache seed image build succeeded
+      ansible.builtin.assert:
+        that:
+          - >-
+            (infra_cache_seed_buildkit.rc | default(1) == 0)
+            or (
+              infra_cache_seed_staging_build is defined
+              and (infra_cache_seed_staging_build.rc | default(1) == 0)
+            )
+        fail_msg: >-
+          Infra cache seed docker build failed
+          (BuildKit rc={{ infra_cache_seed_buildkit.rc | default('unset') }}).
+          The seed registry must be external; TLS certs are never packed.
+
+    - name: Push infra cache seed image
+      ansible.builtin.command:
+        argv:
+          - docker
+          - push
+          - "{{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}"
+      async: "{{ infra_cache_seed_publish_timeout_sec | int }}"
+      poll: "{{ infra_cache_seed_async_poll_sec | int }}"
+  always:
+    - name: Infra cache seed publish cleanup
+      block:
+        - ansible.builtin.include_tasks: restart_services.yaml
+          when: infra_cache_seed_stop_services | default(true) | bool
+      always:
+        - ansible.builtin.include_tasks: logout.yaml

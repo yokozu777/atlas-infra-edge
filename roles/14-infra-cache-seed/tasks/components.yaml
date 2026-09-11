@@ -1,0 +1,134 @@
+---
+# Build infra_cache_seed_components and stop-targets from the active include map.
+
+- name: Require infra cache seed include map
+  ansible.builtin.assert:
+    that:
+      - infra_cache_seed_include is defined
+      - infra_cache_seed_include is mapping
+    fail_msg: infra_cache_seed_include must be a mapping (registry/helm_repo/pkg_repo/custom_www).
+
+- name: Build infra cache seed component list
+  ansible.builtin.set_fact:
+    infra_cache_seed_components: >-
+      {{
+        []
+        + ([{
+            'name': 'pkg_repo',
+            'seed_dir': 'pkg-repo',
+            'host_dir': pkg_repo_nginx_cache_dir,
+            'nginx': true
+          }] if (infra_cache_seed_include.pkg_repo | default(false) | bool) else [])
+        + ([{
+            'name': 'helm_repo',
+            'seed_dir': 'helm-repo',
+            'host_dir': helm_repo_nginx_cache_dir,
+            'nginx': true
+          }] if (infra_cache_seed_include.helm_repo | default(false) | bool) else [])
+        + ([{
+            'name': 'helm_releases',
+            'seed_dir': 'helm-releases',
+            'host_dir': helm_repo_nginx_releases_dir,
+            'nginx': true
+          }] if (infra_cache_seed_include.helm_repo | default(false) | bool) else [])
+        + ([{
+            'name': 'custom_www',
+            'seed_dir': 'custom-www',
+            'host_dir': custom_nginx_www_dir,
+            'nginx': true
+          }] if (infra_cache_seed_include.custom_www | default(false) | bool) else [])
+        + ([{
+            'name': 'registry',
+            'seed_dir': 'registry',
+            'host_dir': registry_data_dir,
+            'nginx': false
+          }] if (infra_cache_seed_include.registry | default(false) | bool) else [])
+      }}
+
+- name: Derive seed registry host from image reference
+  ansible.builtin.set_fact:
+    infra_cache_seed_registry_host: >-
+      {{
+        (
+          infra_cache_seed_image.split('/')[0]
+          if (
+            ('.' in infra_cache_seed_image.split('/')[0])
+            or (':' in infra_cache_seed_image.split('/')[0])
+            or (infra_cache_seed_image.split('/')[0] == 'localhost')
+          )
+          else 'docker.io'
+        )
+      }}
+
+- name: Build infra cache seed stop targets
+  ansible.builtin.set_fact:
+    infra_cache_seed_stop_targets: >-
+      {{
+        []
+        + ([{
+            'name': 'registry',
+            'unit': compose_systemd_registry_unit_name,
+            'project_dir': registry_compose_project_dir
+          }] if (infra_cache_seed_include.registry | default(false) | bool) else [])
+        + ([{
+            'name': 'registry_nginx',
+            'unit': compose_systemd_registry_nginx_unit_name,
+            'project_dir': registry_nginx_compose_project_dir
+          }] if (
+            (
+              (infra_cache_seed_include.pkg_repo | default(false) | bool)
+              and (pkg_repo_nginx_shared_with_registry | default(true) | bool)
+              and (setup_registry_nginx | default(false) | bool)
+            )
+            or (
+              (infra_cache_seed_include.helm_repo | default(false) | bool)
+              and (helm_repo_nginx_shared_with_registry | default(true) | bool)
+              and (setup_registry_nginx | default(false) | bool)
+            )
+            or (
+              (infra_cache_seed_include.custom_www | default(false) | bool)
+              and (custom_nginx_shared_with_registry | default(true) | bool)
+              and (setup_registry_nginx | default(false) | bool)
+            )
+          ) else [])
+        + ([{
+            'name': 'pkg_repo_nginx',
+            'unit': compose_systemd_pkg_repo_nginx_unit_name,
+            'project_dir': pkg_repo_nginx_compose_project_dir
+          }] if (
+            (infra_cache_seed_include.pkg_repo | default(false) | bool)
+            and not (
+              (pkg_repo_nginx_shared_with_registry | default(true) | bool)
+              and (setup_registry_nginx | default(false) | bool)
+            )
+          ) else [])
+        + ([{
+            'name': 'helm_repo_nginx',
+            'unit': compose_systemd_helm_repo_nginx_unit_name,
+            'project_dir': helm_repo_nginx_compose_project_dir
+          }] if (
+            (infra_cache_seed_include.helm_repo | default(false) | bool)
+            and not (
+              (helm_repo_nginx_shared_with_registry | default(true) | bool)
+              and (setup_registry_nginx | default(false) | bool)
+            )
+          ) else [])
+        + ([{
+            'name': 'custom_nginx',
+            'unit': compose_systemd_custom_nginx_unit_name,
+            'project_dir': custom_nginx_compose_project_dir
+          }] if (
+            (infra_cache_seed_include.custom_www | default(false) | bool)
+            and not (
+              (custom_nginx_shared_with_registry | default(true) | bool)
+              and (setup_registry_nginx | default(false) | bool)
+            )
+          ) else [])
+      }}
+
+- name: Reset infra cache seed stopped-service bookkeeping
+  ansible.builtin.set_fact:
+    infra_cache_seed_stopped: {}
+    infra_cache_seed_skip_load: false
+    infra_cache_seed_skip_reason: not_evaluated
+    infra_cache_seed_image_digest: ""

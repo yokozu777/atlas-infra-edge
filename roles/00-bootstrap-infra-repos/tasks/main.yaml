@@ -1,0 +1,172 @@
+---
+# Preserve cloud-init OS package mirrors and add public Docker CE repos before step-ca/Nexus.
+# https://docs.docker.com/engine/install/
+
+- name: Check infra bootstrap repo marker
+  ansible.builtin.stat:
+    path: "{{ infra_bootstrap_repo_marker }}"
+  register: infra_bootstrap_repo_marker_stat
+
+- name: Ensure infra bootstrap state directory exists
+  ansible.builtin.file:
+    path: "{{ infra_bootstrap_repo_state_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Backup cloud-init APT sources on first bootstrap
+  when:
+    - not infra_bootstrap_repo_marker_stat.stat.exists
+    - ansible_facts['os_family'] == 'Debian'
+  block:
+    - name: Ensure APT repo backup directory exists
+      ansible.builtin.file:
+        path: "{{ infra_bootstrap_repo_backup_dir }}/apt"
+        state: directory
+        mode: "0755"
+
+    - name: Find existing APT source files for backup
+      ansible.builtin.find:
+        paths:
+          - /etc/apt/sources.list.d
+          - /etc/apt/mirrors
+        patterns: "*"
+        file_type: file
+        recurse: true
+      register: infra_bootstrap_apt_sources
+
+    - name: Ensure APT backup parent directories exist
+      ansible.builtin.file:
+        path: >-
+          {{
+            (
+              infra_bootstrap_repo_backup_dir ~ '/apt/' ~ (item.path | regex_replace('^/', ''))
+            ) | dirname
+          }}
+        state: directory
+        mode: "0755"
+      loop: "{{ infra_bootstrap_apt_sources.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Save cloud-init APT source files
+      ansible.builtin.copy:
+        src: "{{ item.path }}"
+        dest: "{{ infra_bootstrap_repo_backup_dir }}/apt/{{ item.path | regex_replace('^/', '') }}"
+        remote_src: true
+        mode: preserve
+      loop: "{{ infra_bootstrap_apt_sources.files }}"
+
+    - name: Save /etc/apt/sources.list when present
+      ansible.builtin.stat:
+        path: /etc/apt/sources.list
+      register: infra_bootstrap_apt_sources_list
+
+    - name: Ensure APT sources.list backup directory exists
+      ansible.builtin.file:
+        path: "{{ infra_bootstrap_repo_backup_dir }}/apt/etc/apt"
+        state: directory
+        mode: "0755"
+      when: infra_bootstrap_apt_sources_list.stat.exists
+
+    - name: Backup /etc/apt/sources.list
+      ansible.builtin.copy:
+        src: /etc/apt/sources.list
+        dest: "{{ infra_bootstrap_repo_backup_dir }}/apt/etc/apt/sources.list"
+        remote_src: true
+        mode: preserve
+      when: infra_bootstrap_apt_sources_list.stat.exists
+
+- name: Backup cloud-init YUM/DNF repos on first bootstrap
+  when:
+    - not infra_bootstrap_repo_marker_stat.stat.exists
+    - ansible_facts['distribution'] == 'OracleLinux'
+  block:
+    - name: Ensure YUM repo backup directory exists
+      ansible.builtin.file:
+        path: "{{ infra_bootstrap_repo_backup_dir }}/yum"
+        state: directory
+        mode: "0755"
+
+    - name: Find existing YUM/DNF repo files for backup
+      ansible.builtin.find:
+        paths: /etc/yum.repos.d
+        patterns: "*"
+        file_type: file
+      register: infra_bootstrap_yum_sources
+
+    - name: Save cloud-init YUM/DNF repo files
+      ansible.builtin.copy:
+        src: "{{ item.path }}"
+        dest: "{{ infra_bootstrap_repo_backup_dir }}/yum/{{ item.path | basename }}"
+        remote_src: true
+        mode: preserve
+      loop: "{{ infra_bootstrap_yum_sources.files }}"
+
+- name: Ensure APT keyrings directory exists
+  ansible.builtin.file:
+    path: "{{ docker_apt_key_path | dirname }}"
+    state: directory
+    mode: "0755"
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Download Docker APT GPG key (Debian)
+  ansible.builtin.get_url:
+    url: "{{ docker_apt_public_key_url_debian }}"
+    dest: "{{ docker_apt_key_path }}"
+    mode: "0644"
+  when: ansible_facts['distribution'] == 'Debian'
+
+- name: Download Docker APT GPG key (Ubuntu)
+  ansible.builtin.get_url:
+    url: "{{ docker_apt_public_key_url_ubuntu }}"
+    dest: "{{ docker_apt_key_path }}"
+    mode: "0644"
+  when: ansible_facts['distribution'] == 'Ubuntu'
+
+- name: Add public Docker APT repository (Ubuntu)
+  ansible.builtin.deb822_repository:
+    name: docker-ce
+    types: deb
+    uris: "{{ docker_apt_public_ubuntu_base }}"
+    suites: "{{ ansible_facts['distribution_release'] }}"
+    components: stable
+    signed_by: "{{ docker_apt_key_path }}"
+    state: present
+    enabled: true
+    install_python_debian: true
+  when: ansible_facts['distribution'] == 'Ubuntu'
+
+- name: Add public Docker APT repository (Debian)
+  ansible.builtin.deb822_repository:
+    name: docker-ce
+    types: deb
+    uris: "{{ docker_apt_public_debian_base }}"
+    suites: "{{ ansible_facts['distribution_release'] }}"
+    components: stable
+    signed_by: "{{ docker_apt_key_path }}"
+    state: present
+    enabled: true
+    install_python_debian: true
+  when: ansible_facts['distribution'] == 'Debian'
+
+- name: Install dnf plugins for Docker repo bootstrap (Oracle Linux)
+  ansible.builtin.dnf:
+    name: dnf-plugins-core
+    state: present
+  when: ansible_facts['distribution'] == 'OracleLinux'
+
+- name: Install public Docker DNF repository file (Oracle Linux)
+  ansible.builtin.get_url:
+    url: "{{ docker_dnf_public_repo_url }}"
+    dest: "/etc/yum.repos.d/{{ docker_dnf_public_repo_filename }}.repo"
+    mode: "0644"
+  when: ansible_facts['distribution'] == 'OracleLinux'
+
+- name: Mark infra bootstrap repos as configured
+  ansible.builtin.copy:
+    dest: "{{ infra_bootstrap_repo_marker }}"
+    content: |
+      configured_at={{ ansible_facts['date_time']['iso8601'] }}
+      distribution={{ ansible_facts['distribution'] }}
+      release={{ ansible_facts['distribution_release'] | default('') }}
+    mode: "0644"

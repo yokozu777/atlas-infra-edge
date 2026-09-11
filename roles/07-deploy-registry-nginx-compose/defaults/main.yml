@@ -1,0 +1,5 @@
+---
+# Override these knobs via inventory / group_vars when needed.
+
+# GitHub Releases file store bind-mount (shared helm + registry-nginx).
+helm_repo_nginx_releases_dir: /opt/helm-repo-nginx/releases

@@ -1,0 +1,60 @@
+---
+# Optional runtime helpers (not imported from thin main.yaml).
+# Canonical path: render → mark_pending → compose_reconcile; chart warm via
+# compose_start_registry or explicit --tags helm_repo_cache_warm.
+
+- name: Check registry nginx container state for helm-repo vhost reload
+  ansible.builtin.command:
+    cmd: docker inspect -f '{{ "{{" }}.State.Running{{ "}}" }}' {{ registry_nginx_container_name }}
+  register: registry_nginx_container_running
+  changed_when: false
+  failed_when: false
+  when:
+    - helm_repo_vhosts_deployed.changed | default(false)
+    - helm_repo_nginx_shared_with_registry | default(true) | bool
+    - setup_registry_nginx | default(false) | bool
+
+- name: Reload shared registry nginx after helm-repo vhost change
+  ansible.builtin.command:
+    cmd: docker exec {{ registry_nginx_container_name }} nginx -s reload
+  register: helm_repo_nginx_reloaded
+  changed_when: helm_repo_nginx_reloaded.rc == 0
+  failed_when: false
+  when:
+    - helm_repo_vhosts_deployed.changed | default(false)
+    - helm_repo_nginx_shared_with_registry | default(true) | bool
+    - setup_registry_nginx | default(false) | bool
+    - registry_nginx_container_running.stdout | default('false') == 'true'
+
+- name: Restart shared registry nginx after helm-repo vhost change when main nginx.conf was updated
+  ansible.builtin.command:
+    cmd: docker compose up -d --remove-orphans --force-recreate
+    chdir: "{{ registry_nginx_compose_project_dir }}"
+  register: helm_repo_registry_nginx_recreated
+  changed_when: helm_repo_registry_nginx_recreated.rc == 0
+  when:
+    - helm_repo_vhosts_deployed.changed | default(false)
+    - helm_repo_nginx_shared_with_registry | default(true) | bool
+    - setup_registry_nginx | default(false) | bool
+    - ansible_facts.get('compose_stacks_pending_restart', []) | intersect([compose_systemd_registry_nginx_unit_name]) | length > 0
+
+- name: Check registry nginx compose project for helm-repo vhost restart
+  ansible.builtin.stat:
+    path: "{{ registry_nginx_compose_project_dir }}/docker-compose.yml"
+  register: registry_nginx_compose_project
+  when:
+    - helm_repo_vhosts_deployed.changed | default(false)
+    - helm_repo_nginx_shared_with_registry | default(true) | bool
+    - setup_registry_nginx | default(false) | bool
+    - registry_nginx_container_running.stdout | default('false') != 'true'
+
+- name: Restart shared registry nginx compose after helm-repo vhost change when container is down
+  ansible.builtin.systemd:
+    name: "{{ compose_systemd_registry_nginx_unit_name }}.service"
+    state: restarted
+  when:
+    - helm_repo_vhosts_deployed.changed | default(false)
+    - helm_repo_nginx_shared_with_registry | default(true) | bool
+    - setup_registry_nginx | default(false) | bool
+    - registry_nginx_container_running.stdout | default('false') != 'true'
+    - registry_nginx_compose_project.stat.exists | default(false)

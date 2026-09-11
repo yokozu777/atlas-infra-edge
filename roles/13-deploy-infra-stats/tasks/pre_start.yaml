@@ -1,0 +1,31 @@
+---
+# compose_start_registry pre_start: issue TLS after step-ca is up (cold path),
+# then re-publish stats so known leaves + issued certs are not stale from render.
+
+- name: Check step-ca provision state for infra-stats TLS
+  ansible.builtin.stat:
+    path: "{{ stepca_provisioned_marker }}"
+  register: stepca_provisioned_for_infra_stats_tls
+  when: infra_stats_tls_enabled | default(false) | bool
+
+- name: Issue infra-stats TLS certificates
+  ansible.builtin.import_tasks: issue_tls.yaml
+  when: infra_stats_tls_enabled | default(false) | bool
+
+- name: Mark infra-stats pending restart after deferred TLS issue
+  ansible.builtin.include_role:
+    name: 06-enable-compose-systemd
+    tasks_from: mark_compose_pending_restart.yaml
+  vars:
+    compose_pending_restart_units:
+      - "{{ compose_systemd_registry_nginx_unit_name }}"
+  when:
+    - infra_stats_tls_enabled | default(false) | bool
+    - infra_stats_tls_cert_issued.changed | default(false)
+
+- name: Record infra-stats publish source for compose_start_registry
+  ansible.builtin.set_fact:
+    infra_stats_publish_source: compose_start_registry
+
+- name: Publish infra-stats HTML/JSON after peer and local TLS
+  ansible.builtin.import_tasks: publish.yaml

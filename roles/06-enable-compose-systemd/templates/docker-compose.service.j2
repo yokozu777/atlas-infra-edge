@@ -1,0 +1,23 @@
+[Unit]
+Description=Docker Compose {{ compose_systemd_description }}
+Documentation=https://docs.docker.com/compose/
+Requires=docker.service
+After=docker.service network-online.target{% if compose_systemd_after_units | default('') | length > 0 %} {{ compose_systemd_after_units }}{% endif %}
+
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=10
+WorkingDirectory={{ compose_systemd_project_dir }}
+ExecStart=/usr/bin/docker compose up -d{% if compose_systemd_up_extra | length > 0 %} {{ compose_systemd_up_extra }}{% endif %}
+
+ExecStop=/usr/bin/docker compose stop
+
+TimeoutStartSec=300
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

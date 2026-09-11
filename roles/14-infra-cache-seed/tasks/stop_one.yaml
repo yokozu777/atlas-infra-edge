@@ -1,0 +1,68 @@
+---
+- name: Reset per-unit probes for infra cache seed stop
+  ansible.builtin.set_fact:
+    infra_cache_seed_unit_active: false
+    infra_cache_seed_compose_up: false
+
+- name: Probe {{ item.name }} systemd unit before infra cache seed
+  ansible.builtin.command:
+    cmd: systemctl is-active {{ item.unit }}.service
+  register: infra_cache_seed_unit_probe
+  changed_when: false
+  failed_when: false
+  when: setup_compose_systemd | default(false) | bool
+
+- name: Record {{ item.name }} systemd active for infra cache seed
+  ansible.builtin.set_fact:
+    infra_cache_seed_unit_active: true
+  when:
+    - setup_compose_systemd | default(false) | bool
+    - infra_cache_seed_unit_probe.stdout | default('') == 'active'
+
+- name: Probe {{ item.name }} compose containers before infra cache seed
+  ansible.builtin.command:
+    cmd: docker compose ps -q
+    chdir: "{{ item.project_dir }}"
+  register: infra_cache_seed_ps_probe
+  changed_when: false
+  failed_when: false
+  when: >-
+    (item.project_dir | default('') | length > 0)
+    and (
+      not (setup_compose_systemd | default(false) | bool)
+      or (infra_cache_seed_unit_active | bool)
+    )
+
+- name: Record {{ item.name }} compose up for infra cache seed
+  ansible.builtin.set_fact:
+    infra_cache_seed_compose_up: true
+  when: >-
+    infra_cache_seed_ps_probe is defined
+    and (infra_cache_seed_ps_probe.skipped | default(false)) == false
+    and (infra_cache_seed_ps_probe.stdout | default('') | trim | length) > 0
+
+- name: Stop {{ item.name }} compose project before infra cache seed
+  ansible.builtin.command:
+    cmd: docker compose stop
+    chdir: "{{ item.project_dir }}"
+  when: >-
+    (infra_cache_seed_unit_active | bool)
+    or (infra_cache_seed_compose_up | bool)
+  changed_when: false
+  failed_when: false
+
+- name: Mark {{ item.name }} systemd unit stopped before infra cache seed
+  ansible.builtin.systemd:
+    name: "{{ item.unit }}.service"
+    state: stopped
+  when:
+    - setup_compose_systemd | default(false) | bool
+    - infra_cache_seed_unit_active | bool
+  failed_when: false
+
+- name: Record {{ item.name }} was stopped for infra cache seed
+  ansible.builtin.set_fact:
+    infra_cache_seed_stopped: "{{ infra_cache_seed_stopped | combine({item.name: true}) }}"
+  when: >-
+    (infra_cache_seed_unit_active | bool)
+    or (infra_cache_seed_compose_up | bool)

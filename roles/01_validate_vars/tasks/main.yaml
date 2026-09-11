@@ -1,0 +1,40 @@
+---
+# Contract checks for standalone / orchestrated runs (localhost).
+# Feature-gated secrets and pull-mode consistency — expand here, not in role defaults.
+
+- name: Validate inventory group for infra platform hosts
+  ansible.builtin.assert:
+    that:
+      - infra_platform_hosts is defined
+      - infra_platform_hosts | length > 0
+      - groups[infra_platform_hosts] is defined
+      - groups[infra_platform_hosts] | length > 0
+    fail_msg: >-
+      inventory must define a non-empty group named by
+      infra_platform_hosts={{ infra_platform_hosts }}
+      (see inventory-example.yml)
+
+
+- name: Validate DNS identity
+  ansible.builtin.assert:
+    that:
+      - dns_domain_suffix | default('') | length > 0
+      - cluster_domain | default('') | length > 0
+    fail_msg: dns_domain_suffix and cluster_domain must be set
+
+- name: Validate pull modes and derived gates
+  ansible.builtin.include_tasks: pull_modes.yml
+
+- name: Validate helm-repo GitHub releases warm specs
+  ansible.builtin.include_tasks: helm_repo.yml
+
+- name: Validate feature-gated secrets
+  ansible.builtin.include_tasks: secrets.yml
+
+- name: Validate cache sync contract when enabled
+  ansible.builtin.include_tasks: cache_sync.yml
+  when:
+    - nginx_cache_sync_enabled | default(false) | bool
+
+- name: Validate infra cache seed contract (XOR always; layer asserts when enabled)
+  ansible.builtin.include_tasks: cache_seed.yml

@@ -1,0 +1,3 @@
+# Ansible managed: infra host uses local BIND (role 03-deploy-bind-compose)
+nameserver {{ bind_infra_resolver_nameserver }}
+search {{ bind_search_domain | default(dns_domain_suffix) }}

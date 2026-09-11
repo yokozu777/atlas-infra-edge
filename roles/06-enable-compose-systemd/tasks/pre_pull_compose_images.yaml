@@ -1,0 +1,108 @@
+---
+# Phase 2/6: pull with skip-if-present (unless compose_pull_force).
+# Parallel docker pull via async when compose_pull_parallel (default true since Phase 6).
+# Used by compose_pull.yaml. Do not use meta: end_host here — included mid-role.
+
+- name: Deduplicate compose images queued for pull
+  ansible.builtin.set_fact:
+    compose_pull_images_unique: "{{ compose_pre_pull_images | default([]) | unique | list }}"
+
+- name: Check whether compose images already exist locally
+  ansible.builtin.command:
+    cmd: docker image inspect {{ item }}
+  loop: "{{ compose_pull_images_unique }}"
+  register: compose_image_inspect
+  changed_when: false
+  failed_when: false
+  when:
+    - (compose_pull_images_unique | length) > 0
+    - not (compose_pull_force | default(false) | bool)
+
+- name: Resolve compose images that still need docker pull
+  ansible.builtin.set_fact:
+    compose_images_to_pull: >-
+      {{
+        compose_pull_images_unique
+        if (compose_pull_force | default(false) | bool)
+        else (
+          (compose_image_inspect.results | default([]))
+          | selectattr('rc', 'ne', 0)
+          | map(attribute='item')
+          | list
+        )
+      }}
+  when: (compose_pull_images_unique | length) > 0
+
+- name: Clear compose images to pull when queue is empty
+  ansible.builtin.set_fact:
+    compose_images_to_pull: []
+  when: (compose_pull_images_unique | length) == 0
+
+- name: Report compose image pull plan
+  ansible.builtin.debug:
+    msg: >-
+      compose_pull unique={{ compose_pull_images_unique | length }}
+      to_pull={{ compose_images_to_pull | default([]) | length }}
+      skipped={{
+        (compose_pull_images_unique | length)
+        - (compose_images_to_pull | default([]) | length)
+      }}
+      parallel={{ compose_pull_parallel | default(true) | bool }}
+      force={{ compose_pull_force | default(false) | bool }}
+  when: (compose_pull_images_unique | length) > 0
+
+- name: Pre-pull missing compose stack images (serial)
+  ansible.builtin.command:
+    cmd: docker pull {{ item }}
+  loop: "{{ compose_images_to_pull | default([]) }}"
+  register: compose_pre_pull_result
+  until: compose_pre_pull_result is succeeded
+  retries: "{{ compose_pre_pull_retries | default(5) }}"
+  delay: "{{ compose_pre_pull_delay | default(10) }}"
+  changed_when: true
+  when:
+    - (compose_images_to_pull | default([]) | length) > 0
+    - not (compose_pull_parallel | default(true) | bool)
+
+- name: Pre-pull missing compose stack images in parallel
+  ansible.builtin.command:
+    cmd: docker pull {{ item }}
+  loop: "{{ compose_images_to_pull | default([]) }}"
+  async: "{{ compose_pull_async_timeout | default(600) }}"
+  poll: 0
+  register: compose_pre_pull_async
+  when:
+    - (compose_images_to_pull | default([]) | length) > 0
+    - compose_pull_parallel | default(true) | bool
+
+- name: Wait for parallel compose image pulls
+  ansible.builtin.async_status:
+    jid: "{{ item.ansible_job_id }}"
+  loop: "{{ compose_pre_pull_async.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item | default(item.ansible_job_id) }}"
+  register: compose_pre_pull_async_wait
+  until: compose_pre_pull_async_wait.finished
+  retries: "{{ ((compose_pull_async_timeout | default(600)) / 5) | int }}"
+  delay: 5
+  when:
+    - compose_pull_parallel | default(true) | bool
+    - (compose_images_to_pull | default([]) | length) > 0
+    - item.ansible_job_id is defined
+
+- name: Assert parallel compose image pulls succeeded
+  ansible.builtin.assert:
+    that:
+      - not (item.failed | default(false) | bool)
+      - (item.rc | default(0) | int) == 0
+    fail_msg: >-
+      parallel docker pull failed for
+      {{ item.item | default(item.ansible_job_id | default('unknown')) }}:
+      {{ item.msg | default(item.stderr | default('')) }}
+  loop: "{{ compose_pre_pull_async_wait.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item | default(item.ansible_job_id | default('skip')) }}"
+  when:
+    - compose_pull_parallel | default(true) | bool
+    - (compose_images_to_pull | default([]) | length) > 0
+    - item.ansible_job_id is defined or item.finished is defined

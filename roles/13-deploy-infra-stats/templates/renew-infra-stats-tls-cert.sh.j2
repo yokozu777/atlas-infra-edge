@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+CERT="{{ infra_stats_tls_dir }}/{{ infra_stats_tls_cert_filename }}"
+RENEW_BEFORE="{{ infra_stats_tls_renew_before_seconds | int }}"
+ISSUE_SCRIPT="{{ infra_stats_compose_project_dir }}/issue-infra-stats-tls-cert.sh"
+REGISTRY_COMPOSE_DIR="{{ registry_nginx_compose_project_dir }}"
+
+need_renew=0
+
+if [ ! -f "$CERT" ]; then
+  need_renew=1
+elif ! openssl x509 -checkend "$RENEW_BEFORE" -noout -in "$CERT" 2>/dev/null; then
+  need_renew=1
+fi
+
+if [ "$need_renew" -eq 0 ]; then
+  exit 0
+fi
+
+"$ISSUE_SCRIPT"
+docker compose -f "$REGISTRY_COMPOSE_DIR/docker-compose.yml" up -d --remove-orphans --force-recreate

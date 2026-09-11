@@ -1,0 +1,4 @@
+---
+- name: Reload compose systemd units
+  ansible.builtin.systemd:
+    daemon_reload: true

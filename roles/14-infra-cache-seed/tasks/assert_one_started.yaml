@@ -1,0 +1,49 @@
+---
+# Liveness for one held stop-target (item). Compose project wins over systemd.
+
+- name: Require {{ item.name }} has a unit or compose project
+  ansible.builtin.assert:
+    that:
+      - (item.unit | default('') | length) > 0 or (item.project_dir | default('') | length) > 0
+    fail_msg: >-
+      infra cache seed hold {{ item.name }} has no unit or compose project_dir;
+      refusing to clear the hold
+
+- name: Probe {{ item.name }} compose after seed restart
+  ansible.builtin.command:
+    cmd: docker compose ps -q
+    chdir: "{{ item.project_dir }}"
+  register: infra_cache_seed_started_ps
+  changed_when: false
+  failed_when: false
+  when: (item.project_dir | default('') | length) > 0
+
+- name: Probe {{ item.name }} systemd after seed restart
+  ansible.builtin.command:
+    cmd: systemctl is-active {{ item.unit }}.service
+  register: infra_cache_seed_started_unit
+  changed_when: false
+  failed_when: false
+  when:
+    - (item.project_dir | default('') | length) == 0
+    - (item.unit | default('') | length) > 0
+
+- name: Require {{ item.name }} compose containers after seed restart
+  ansible.builtin.assert:
+    that:
+      - (infra_cache_seed_started_ps.rc | default(1) | int) == 0
+      - (infra_cache_seed_started_ps.stdout | default('') | trim | length) > 0
+    fail_msg: >-
+      infra cache seed {{ item.name }} has no running compose containers
+      after restart (systemd RemainAfterExit is not enough)
+  when: (item.project_dir | default('') | length) > 0
+
+- name: Require {{ item.name }} systemd unit active after seed restart
+  ansible.builtin.assert:
+    that:
+      - infra_cache_seed_started_unit.stdout | default('') == 'active'
+    fail_msg: >-
+      infra cache seed {{ item.name }} systemd unit is not active after restart
+  when:
+    - (item.project_dir | default('') | length) == 0
+    - (item.unit | default('') | length) > 0

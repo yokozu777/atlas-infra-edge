@@ -1,0 +1,7 @@
+---
+# Ansible Galaxy collections used by roles in this repo.
+# Standalone: ansible-galaxy collection install -r requirements.yml
+# Collections required for local / CI ansible-playbook runs.
+collections:
+  - name: ansible.posix
+    version: ">=2.2.0"

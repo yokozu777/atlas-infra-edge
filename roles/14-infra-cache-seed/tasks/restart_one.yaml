@@ -1,0 +1,14 @@
+---
+- name: Start {{ item.name }} compose unit after infra cache seed
+  ansible.builtin.systemd:
+    name: "{{ item.unit }}.service"
+    state: started
+  when: setup_compose_systemd | default(false) | bool
+  failed_when: false
+
+- name: Start {{ item.name }} compose project after infra cache seed
+  ansible.builtin.command:
+    cmd: docker compose up -d --remove-orphans
+    chdir: "{{ item.project_dir }}"
+  when: not (setup_compose_systemd | default(false) | bool)
+  failed_when: false

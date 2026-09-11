@@ -1,0 +1,21 @@
+{#
+  Schema reference only — runtime stats.json is written by refresh_infra_stats.py
+  (not by Ansible template).
+
+  Fields: generated_by, hostname, path, dns_domain_suffix, note,
+  bind_scrape_ok, ntp_scrape_ok, known_scrape_ok, issued_scrape_ok, issued_annotate_ok,
+  bind_scrape_stale, ntp_scrape_stale, known_scrape_stale, issued_scrape_stale,
+  cache_scrape_ok, cache_scrape_stale,
+  docker_hub, ca,
+  nginx_locations, pkg_repos, helm_repos, docker_repos,
+  bind_zones, bind_inventory_fallback, ntp, certs, issued_certs, cache.
+
+  generated_by examples: ansible-compose_render | ansible-compose_start_registry | cron-refresh
+  runtime writer: refresh_infra_stats.py
+#}
+{
+  "generated_by": "ansible-{{ infra_stats_publish_source | default('compose_render') }}",
+  "note": "schema stub — runtime writer: refresh_infra_stats.py",
+  "docker_hub": {},
+  "ca": {}
+}

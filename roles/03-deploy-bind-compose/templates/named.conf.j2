@@ -1,0 +1,43 @@
+options {
+	directory "/var/cache/bind";
+{% if bind_allow_query | default([]) | length > 0 %}
+	allow-query { {% for net in bind_allow_query %}{{ net }}; {% endfor %}};
+{% endif %}
+{% if bind_allow_recursion | default([]) | length > 0 %}
+	allow-recursion { {% for net in bind_allow_recursion %}{{ net }}; {% endfor %}};
+{% endif %}
+{% if bind_forwarders | default([]) | length > 0 %}
+	forwarders { {% for addr in bind_forwarders %}{{ addr }}; {% endfor %}};
+	forward {{ bind_forward_policy | default('only') }};
+{% endif %}
+	dnssec-validation no;
+	listen-on-v6 { none; };
+};
+
+{% for zone_id, zone in bind_zones.items() %}
+key "{{ zone.tsig_key_name }}" {
+	algorithm {{ zone.tsig_algorithm | default(bind_dns_algorithm) }};
+	secret "{{ zone.tsig_secret }}";
+};
+
+{% endfor %}
+{% for zone_id, zone in bind_zones.items() %}
+zone "{{ zone.name }}" IN {
+	type master;
+	file "/etc/bind/{{ bind_zones_subdir }}/{{ zone.name }}.db";
+{% if (zone.update_mode | default('zonesub')) == 'allow-update' %}
+	allow-update { key {{ zone.tsig_key_name }}; };
+	allow-transfer {
+		key "{{ zone.tsig_key_name }}";
+	};
+{% else %}
+	allow-transfer {
+		key "{{ zone.tsig_key_name }}";
+	};
+	update-policy {
+		grant {{ zone.tsig_key_name }} zonesub ANY;
+	};
+{% endif %}
+};
+
+{% endfor %}

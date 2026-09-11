@@ -1,0 +1,56 @@
+---
+# Optional runtime helpers (not imported from thin main.yaml).
+# Canonical path: render → mark_pending → compose_reconcile (restart + nginx reload)
+# and compose_start_registry warm. Use tasks_from: apply_runtime.yaml only for
+# ad-hoc in-place reload/recreate without a full reconcile.
+
+- name: Check registry nginx container state for pkg-repo vhost reload
+  ansible.builtin.command:
+    cmd: docker inspect -f '{{ "{{" }}.State.Running{{ "}}" }}' {{ registry_nginx_container_name }}
+  register: registry_nginx_container_running
+  changed_when: false
+  failed_when: false
+  when:
+    - pkg_repo_vhosts_deployed.changed | default(false)
+    - pkg_repo_nginx_shared_with_registry | default(true) | bool
+    - setup_registry_nginx | default(false) | bool
+
+- name: Reload shared registry nginx after pkg-repo vhost change
+  ansible.builtin.command:
+    cmd: docker exec {{ registry_nginx_container_name }} nginx -s reload
+  register: pkg_repo_nginx_reloaded
+  changed_when: pkg_repo_nginx_reloaded.rc == 0
+  failed_when: false
+  when:
+    - pkg_repo_vhosts_deployed.changed | default(false)
+    - pkg_repo_nginx_shared_with_registry | default(true) | bool
+    - setup_registry_nginx | default(false) | bool
+    - registry_nginx_container_running.stdout | default('false') == 'true'
+
+- name: Check registry nginx compose project for pkg-repo vhost restart
+  ansible.builtin.stat:
+    path: "{{ registry_nginx_compose_project_dir }}/docker-compose.yml"
+  register: registry_nginx_compose_project
+  when:
+    - pkg_repo_vhosts_deployed.changed | default(false)
+    - pkg_repo_nginx_shared_with_registry | default(true) | bool
+    - setup_registry_nginx | default(false) | bool
+    - registry_nginx_container_running.stdout | default('false') != 'true'
+
+- name: Restart shared registry nginx compose after pkg-repo vhost change when container is down
+  ansible.builtin.systemd:
+    name: "{{ compose_systemd_registry_nginx_unit_name }}.service"
+    state: restarted
+  when:
+    - pkg_repo_vhosts_deployed.changed | default(false)
+    - pkg_repo_nginx_shared_with_registry | default(true) | bool
+    - setup_registry_nginx | default(false) | bool
+    - registry_nginx_container_running.stdout | default('false') != 'true'
+    - registry_nginx_compose_project.stat.exists | default(false)
+
+- name: Warm pkg-repo nginx metadata cache inline (non-systemd hosts only)
+  ansible.builtin.import_tasks: warm_cache.yaml
+  when:
+    - pkg_repo_nginx_cache_warm_enabled | default(true) | bool
+    - pkg_repo_vhosts_deployed.changed | default(false)
+    - not (setup_compose_systemd | default(false) | bool)

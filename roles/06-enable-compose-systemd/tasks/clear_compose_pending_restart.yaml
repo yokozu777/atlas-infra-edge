@@ -1,0 +1,5 @@
+---
+- name: Clear compose stacks pending restart in fact cache
+  ansible.builtin.set_fact:
+    compose_stacks_pending_restart: []
+    cacheable: true

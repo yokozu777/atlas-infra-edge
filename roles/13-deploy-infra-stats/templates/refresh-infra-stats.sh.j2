@@ -1,0 +1,24 @@
+#!/bin/sh
+# Ansible managed: scrape + render infra-stats HTML/JSON (Ansible publish + cron).
+set -eu
+
+COMPOSE_DIR="{{ infra_stats_compose_project_dir }}"
+LOCK_FILE="${COMPOSE_DIR}/refresh-infra-stats.lock"
+PY="${COMPOSE_DIR}/refresh_infra_stats.py"
+LOCK_WAIT_SEC=120
+
+export INFRA_STATS_CONTEXT="${INFRA_STATS_CONTEXT:-${COMPOSE_DIR}/publish_context.json}"
+export INFRA_STATS_SCRAPE_DIR="${INFRA_STATS_SCRAPE_DIR:-{{ infra_stats_scrape_dir }}}"
+export INFRA_STATS_HTML_DIR="${INFRA_STATS_HTML_DIR:-{{ infra_stats_html_dir }}}"
+export INFRA_STATS_HTML_TEMPLATE="${INFRA_STATS_HTML_TEMPLATE:-${COMPOSE_DIR}/templates/stats.html.j2}"
+# Default for cron; Ansible publish overrides via environment.
+export INFRA_STATS_GENERATED_BY="${INFRA_STATS_GENERATED_BY:-cron-refresh}"
+
+set +e
+flock -w "$LOCK_WAIT_SEC" "$LOCK_FILE" python3 "$PY"
+rc=$?
+set -e
+if [ "$rc" -ne 0 ]; then
+  echo "infra-stats refresh failed (rc=$rc)" >&2
+  exit "$rc"
+fi

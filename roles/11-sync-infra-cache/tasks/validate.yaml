@@ -1,0 +1,184 @@
+---
+- name: Require infra cache sync remote host
+  ansible.builtin.assert:
+    that:
+      - nginx_cache_sync_remote_host | length > 0
+    fail_msg: >-
+      Set nginx_cache_sync_remote_host (extra-var) to the peer infra host
+      for push/pull.
+
+- name: Require valid infra cache sync direction
+  ansible.builtin.assert:
+    that:
+      - nginx_cache_sync_direction in ['push', 'pull']
+    fail_msg: nginx_cache_sync_direction must be push or pull.
+
+- name: Require at least one infra cache sync component
+  ansible.builtin.assert:
+    that:
+      - >-
+        nginx_cache_sync_pkg_repo_enabled | bool
+        or nginx_cache_sync_helm_repo_enabled | bool
+        or nginx_cache_sync_registry_enabled | bool
+        or nginx_cache_sync_custom_www_enabled | bool
+    fail_msg: Enable at least one of nginx_cache_sync_*_enabled components.
+
+- name: Require SSH private key for key auth
+  ansible.builtin.assert:
+    that:
+      - nginx_cache_sync_ssh_private_key | length > 0
+    fail_msg: nginx_cache_sync_ssh_private_key is empty.
+  when: nginx_cache_sync_ssh_auth == 'key'
+
+- name: Stat SSH private key for key auth
+  ansible.builtin.stat:
+    path: "{{ nginx_cache_sync_ssh_private_key }}"
+  register: nginx_cache_sync_ssh_key_stat
+  when: nginx_cache_sync_ssh_auth == 'key'
+
+- name: Require readable SSH private key file
+  ansible.builtin.assert:
+    that:
+      - nginx_cache_sync_ssh_key_stat.stat.exists
+      - nginx_cache_sync_ssh_key_stat.stat.readable
+    fail_msg: >-
+      SSH private key {{ nginx_cache_sync_ssh_private_key }} is missing or not readable.
+  when: nginx_cache_sync_ssh_auth == 'key'
+
+- name: Require SSH password for password auth
+  ansible.builtin.assert:
+    that:
+      - nginx_cache_sync_ssh_password | length > 0
+    fail_msg: >-
+      Set nginx_cache_sync_ssh_password (extra-var / vault) when
+      nginx_cache_sync_ssh_auth=password.
+  when: nginx_cache_sync_ssh_auth == 'password'
+  no_log: true
+
+- name: Check sshpass for password auth
+  ansible.builtin.shell: command -v sshpass
+  args:
+    executable: /bin/bash
+  register: nginx_cache_sync_sshpass_check
+  changed_when: false
+  failed_when: false
+  when: nginx_cache_sync_ssh_auth == 'password'
+
+- name: Install sshpass for password auth (Oracle Linux)
+  ansible.builtin.dnf:
+    name: sshpass
+    state: present
+  when:
+    - nginx_cache_sync_ssh_auth == 'password'
+    - ansible_facts['distribution'] == 'OracleLinux'
+    - nginx_cache_sync_sshpass_check.rc | default(1) != 0
+
+- name: Install sshpass for password auth (Debian family)
+  ansible.builtin.apt:
+    name: sshpass
+    state: present
+    update_cache: false
+  when:
+    - nginx_cache_sync_ssh_auth == 'password'
+    - ansible_facts['os_family'] == 'Debian'
+    - nginx_cache_sync_sshpass_check.rc | default(1) != 0
+
+- name: Require sshpass for password auth
+  ansible.builtin.shell: command -v sshpass
+  args:
+    executable: /bin/bash
+  register: nginx_cache_sync_sshpass_verify
+  changed_when: false
+  failed_when: nginx_cache_sync_sshpass_verify.rc != 0
+  when: nginx_cache_sync_ssh_auth == 'password'
+
+- name: Require rsync on infra host
+  ansible.builtin.shell: command -v rsync
+  args:
+    executable: /bin/bash
+  register: nginx_cache_sync_rsync_check
+  changed_when: false
+  failed_when: nginx_cache_sync_rsync_check.rc != 0
+
+- name: Build registry proxy upstreams for cache sync
+  ansible.builtin.set_fact:
+    registry_proxy_upstreams: >-
+      {{
+        registry_proxy_upstreams | default([])
+        + [mirror | combine({
+          'proxy_port': registry_proxy_port_base | int + (registry_proxy_upstreams | default([]) | length),
+          'data_subdir': mirror.dir_name | regex_replace('[^a-zA-Z0-9._-]', '_'),
+          'service_name': 'proxy-' ~ (mirror.dir_name | regex_replace('[^a-zA-Z0-9._-]', '-')),
+          'proxy_slug': mirror.dir_name | regex_replace('[^a-zA-Z0-9._-]', '-') | replace('.', '-'),
+          'proxy_hostname': mirror.dir_name | registry_mirror_host(registry_ingress_domain),
+          'upstream_host': mirror.server | regex_replace('^https://', '') | regex_replace('/.*$', '')
+        })]
+      }}
+  loop: "{{ containerd_registry_mirrors | default([]) }}"
+  loop_control:
+    loop_var: mirror
+  when:
+    - nginx_cache_sync_registry_enabled | bool
+    - mirror.direct is not defined
+    - mirror.server is match('^https://[^/]*\\.[^/]+/?$')
+    - mirror.server not in (registry_proxy_upstreams | default([]) | map(attribute='server') | list)
+
+- name: Build SSH transport for infra cache sync
+  ansible.builtin.set_fact:
+    nginx_cache_sync_rsync_rsh: >-
+      {% if nginx_cache_sync_ssh_auth == 'password' -%}
+      sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p {{ nginx_cache_sync_remote_port }}
+      {%- else -%}
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p {{ nginx_cache_sync_remote_port }} -i {{ nginx_cache_sync_ssh_private_key }}
+      {%- endif %}
+    nginx_cache_sync_ssh_target: "{{ nginx_cache_sync_remote_user }}@{{ nginx_cache_sync_remote_host }}"
+    nginx_cache_sync_needs_registry_nginx_stop: >-
+      {{
+        (
+          nginx_cache_sync_pkg_repo_enabled | bool
+          and pkg_repo_nginx_shared_with_registry | default(true) | bool
+          and setup_registry_nginx | default(false) | bool
+        )
+        or (
+          nginx_cache_sync_helm_repo_enabled | bool
+          and helm_repo_nginx_shared_with_registry | default(true) | bool
+          and setup_registry_nginx | default(false) | bool
+        )
+        or (
+          nginx_cache_sync_custom_www_enabled | bool
+          and custom_nginx_shared_with_registry | default(true) | bool
+          and setup_registry_nginx | default(false) | bool
+        )
+      }}
+    nginx_cache_sync_needs_pkg_repo_nginx_stop: >-
+      {{
+        nginx_cache_sync_pkg_repo_enabled | bool
+        and not (
+          pkg_repo_nginx_shared_with_registry | default(true) | bool
+          and setup_registry_nginx | default(false) | bool
+        )
+      }}
+    nginx_cache_sync_needs_helm_repo_nginx_stop: >-
+      {{
+        nginx_cache_sync_helm_repo_enabled | bool
+        and not (
+          helm_repo_nginx_shared_with_registry | default(true) | bool
+          and setup_registry_nginx | default(false) | bool
+        )
+      }}
+    nginx_cache_sync_needs_custom_nginx_stop: >-
+      {{
+        nginx_cache_sync_custom_www_enabled | bool
+        and not (
+          custom_nginx_shared_with_registry | default(true) | bool
+          and setup_registry_nginx | default(false) | bool
+        )
+      }}
+
+- name: Build rsync options for infra cache sync
+  ansible.builtin.set_fact:
+    nginx_cache_sync_rsync_opts_effective: >-
+      {{
+        nginx_cache_sync_rsync_extra_opts
+        + ['-e', nginx_cache_sync_rsync_rsh]
+      }}

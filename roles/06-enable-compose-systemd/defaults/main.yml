@@ -1,0 +1,261 @@
+---
+# Override these knobs via inventory / group_vars when needed.
+
+compose_pre_pull_retries: 5
+compose_pre_pull_delay: 10
+# Phase 6 pull behaviour (pre_pull_compose_images.yaml / compose_pull.yaml)
+compose_pull_force: false
+# Default true: parallel async docker pull for missing images (set false to serialise).
+compose_pull_parallel: true
+compose_pull_async_timeout: 600
+# Phase 6: emit atlas_infra_edge_timing debug lines for compose phases.
+compose_timing_enabled: true
+
+pkg_repo_nginx_warm_container_wait_retries: 30
+pkg_repo_nginx_warm_container_wait_delay: 5
+
+# ---------------------------------------------------------------------------
+# infra_compose_stacks — declarative compose stack catalog
+# ---------------------------------------------------------------------------
+# SoT for stack identity, gates, start_group, and Phase 3 orchestration.
+# Runtime project/image lists are built via filter_plugins/compose_stacks.py:
+#   compose_stacks_to_projects / compose_stacks_to_images
+#
+# Phase entrypoints (role 06 tasks_from; canonical cold-path tags):
+#   compose_render.yaml / compose_pull.yaml / compose_start_group.yaml
+#   compose_reconcile.yaml (also legacy reconcile.yaml)
+#
+# Contract:
+# - render  → templates / files / unit deploy only (no docker pull, no start)
+# - pull    → unique images once (skip-if-present); never inside render
+# - start_group:core     → may start before 11_sync_infra_cache_pull
+# - start_group:registry → must NOT start on cold path until after cache pull
+# - reconcile → pending restarts only (no full image re-pull)
+#
+# Schema (each list item):
+#   id                 unique stack id (stable key for after[] / pending)
+#   role               deploy role directory under roles/
+#   playbook_tag       primary playbook tag for the deploy role
+#   render_from        tasks_from for render-only (Phase 1+)
+#   start_group        core | registry
+#   after              list of stack ids that must start first (DAG)
+#   image_var          inventory var holding the image ref
+#   project_dir_var    inventory var holding the compose project directory
+#   unit_name_var      inventory var holding the systemd unit basename
+#   description        systemd Description=
+#   up_extra           extra args for `docker compose up` (e.g. --remove-orphans)
+#   enable_when        {all_true: [flag, ...]} — every flag must be true
+#   skip_dedicated_unit_when
+#                      {all_true: [flag, ...]} — when all true, no dedicated
+#                      systemd project (stack is shared into registry-nginx)
+#   pre_start          optional tasks_from hooks before unit start (e.g. NTP)
+#   post_start         tasks_from hooks after unit start (Phase 1+)
+#   warm               cache-warm tasks_from (never from render; start_registry)
+#   bootstrap_from     optional; step-ca ACME bootstrap (start path, not render)
+# ---------------------------------------------------------------------------
+
+infra_compose_stacks:
+  - id: bind
+    role: 03-deploy-bind-compose
+    playbook_tag: 03_deploy_bind_compose
+    render_from: render.yaml
+    start_group: core
+    after: []
+    image_var: bind_image
+    project_dir_var: bind_compose_project_dir
+    unit_name_var: compose_systemd_bind_unit_name
+    description: BIND9 DNS
+    up_extra: ""
+    enable_when:
+      all_true:
+        - setup_bind
+    skip_dedicated_unit_when:
+      all_true: []
+    post_start:
+      - post_start.yaml
+    warm: []
+
+  - id: ntp
+    role: 12-deploy-ntp-compose
+    playbook_tag: 12_deploy_ntp_compose
+    render_from: render.yaml
+    start_group: core
+    after:
+      - bind
+    image_var: ntp_image
+    project_dir_var: ntp_compose_project_dir
+    unit_name_var: compose_systemd_ntp_unit_name
+    description: NTP server (chrony)
+    up_extra: ""
+    enable_when:
+      all_true:
+        - setup_ntp
+    skip_dedicated_unit_when:
+      all_true: []
+    pre_start:
+      - pre_start.yaml
+    post_start:
+      - post_start.yaml
+    warm: []
+
+  - id: stepca
+    role: 04-deploy-stepca-compose
+    playbook_tag: 04_deploy_stepca_compose
+    render_from: render.yaml
+    # ACME / ca.json / mid-role start — main.yaml only (never render-only).
+    bootstrap_from: bootstrap.yaml
+    start_group: core
+    after: []
+    image_var: stepca_image
+    project_dir_var: stepca_compose_project_dir
+    unit_name_var: compose_systemd_stepca_unit_name
+    description: step-ca
+    up_extra: ""
+    enable_when:
+      all_true:
+        - setup_stepca
+    skip_dedicated_unit_when:
+      all_true: []
+    post_start: []
+    warm: []
+
+  - id: registry
+    role: 05-deploy-registry-compose
+    playbook_tag: 05_deploy_registry_compose
+    render_from: render.yaml
+    start_group: registry
+    after: []
+    image_var: registry_image
+    project_dir_var: registry_compose_project_dir
+    unit_name_var: compose_systemd_registry_unit_name
+    description: Docker Registry pull-through proxies
+    up_extra: "--remove-orphans"
+    enable_when:
+      all_true:
+        - setup_registry
+    skip_dedicated_unit_when:
+      all_true: []
+    pre_start:
+      - pre_start.yaml
+    post_start: []
+    warm: []
+
+  - id: registry_nginx
+    role: 07-deploy-registry-nginx-compose
+    playbook_tag: 07_deploy_registry_nginx_compose
+    render_from: render.yaml
+    start_group: registry
+    after:
+      - registry
+    image_var: registry_nginx_image
+    project_dir_var: registry_nginx_compose_project_dir
+    unit_name_var: compose_systemd_registry_nginx_unit_name
+    description: Registry nginx HTTPS ingress
+    up_extra: "--remove-orphans"
+    enable_when:
+      all_true:
+        - setup_registry
+        - setup_registry_nginx
+    skip_dedicated_unit_when:
+      all_true: []
+    post_start: []
+    warm: []
+
+  - id: pkg_repo_nginx
+    role: 08-deploy-pkg-repo-nginx-compose
+    playbook_tag: 08_deploy_pkg_repo_nginx_compose
+    render_from: render.yaml
+    start_group: registry
+    after: []
+    image_var: pkg_repo_nginx_image
+    project_dir_var: pkg_repo_nginx_compose_project_dir
+    unit_name_var: compose_systemd_pkg_repo_nginx_unit_name
+    description: APT/RPM nginx HTTPS cache
+    up_extra: "--remove-orphans"
+    enable_when:
+      all_true:
+        - setup_apt_rpm_nginx
+    skip_dedicated_unit_when:
+      all_true:
+        - pkg_repo_nginx_shared_with_registry
+        - setup_registry_nginx
+    pre_start:
+      - pre_start.yaml
+    post_start: []
+    warm:
+      - warm_cache.yaml
+
+  - id: helm_repo_nginx
+    role: 09-deploy-helm-repo-nginx-compose
+    playbook_tag: 09_deploy_helm_repo_nginx_compose
+    render_from: render.yaml
+    start_group: registry
+    after: []
+    image_var: helm_repo_nginx_image
+    project_dir_var: helm_repo_nginx_compose_project_dir
+    unit_name_var: compose_systemd_helm_repo_nginx_unit_name
+    description: Helm chart nginx HTTPS cache
+    up_extra: "--remove-orphans"
+    enable_when:
+      all_true:
+        - setup_helm_nginx
+    skip_dedicated_unit_when:
+      all_true:
+        - helm_repo_nginx_shared_with_registry
+        - setup_registry_nginx
+    pre_start:
+      - pre_start.yaml
+    post_start: []
+    warm:
+      - warm_cache.yaml
+
+  - id: custom_nginx
+    role: 10-deploy-custom-nginx-compose
+    playbook_tag: 10_deploy_custom_nginx_compose
+    render_from: render.yaml
+    start_group: registry
+    after: []
+    image_var: custom_nginx_image
+    project_dir_var: custom_nginx_compose_project_dir
+    unit_name_var: compose_systemd_custom_nginx_unit_name
+    description: Custom static content nginx HTTPS
+    up_extra: "--remove-orphans"
+    enable_when:
+      all_true:
+        - setup_custom_content_nginx
+    skip_dedicated_unit_when:
+      all_true:
+        - custom_nginx_shared_with_registry
+        - setup_registry_nginx
+    pre_start:
+      - pre_start.yaml
+    post_start: []
+    warm: []
+
+  - id: infra_stats
+    role: 13-deploy-infra-stats
+    playbook_tag: 13_deploy_infra_stats
+    render_from: render.yaml
+    start_group: registry
+    after:
+      - registry
+      - registry_nginx
+      - pkg_repo_nginx
+      - helm_repo_nginx
+      - custom_nginx
+    image_var: infra_stats_image
+    project_dir_var: infra_stats_compose_project_dir
+    unit_name_var: compose_systemd_infra_stats_unit_name
+    description: Infra stats static page on shared registry-nginx
+    up_extra: "--remove-orphans"
+    enable_when:
+      all_true:
+        - setup_infra_stats
+    skip_dedicated_unit_when:
+      all_true:
+        - infra_stats_shared_with_registry
+        - setup_registry_nginx
+    pre_start:
+      - pre_start.yaml
+    post_start: []
+    warm: []

@@ -1,0 +1,13 @@
+---
+- name: Log in to infra cache seed registry
+  ansible.builtin.command:
+    argv:
+      - docker
+      - login
+      - --username
+      - "{{ infra_cache_seed_registry_user }}"
+      - --password-stdin
+      - "{{ infra_cache_seed_registry_host }}"
+    stdin: "{{ infra_cache_seed_registry_password }}"
+  no_log: true
+  changed_when: false

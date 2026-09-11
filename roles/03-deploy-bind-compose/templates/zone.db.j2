@@ -1,0 +1,17 @@
+$TTL {{ bind_zone_ttl }}
+@	IN	SOA {{ bind_soa_mname }}. {{ bind_soa_rname }}. (
+		{{ bind_zone_serial }} ; serial
+		{{ bind_zone_refresh }} ; refresh
+		{{ bind_zone_retry }} ; retry
+		{{ bind_zone_expire }} ; expire
+		{{ bind_zone_minimum }} ) ; minimum
+
+	IN	NS	{{ bind_ns_host }}
+
+{% for record in bind_zone_records %}
+{% if record.type | default('A') == 'A' %}
+{{ record.name }}	IN	A	{{ record.rdata }}
+{% elif record.type == 'NS' %}
+{{ record.name }}	IN	NS	{{ record.rdata }}
+{% endif %}
+{% endfor %}

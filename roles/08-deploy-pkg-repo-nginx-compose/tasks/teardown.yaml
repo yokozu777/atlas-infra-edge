@@ -1,0 +1,73 @@
+---
+- name: Stop standalone pkg-repo nginx compose stack
+  ansible.builtin.systemd:
+    name: "{{ compose_systemd_pkg_repo_nginx_unit_name }}.service"
+    state: stopped
+    enabled: false
+    daemon_reload: true
+  failed_when: false
+  when: >-
+    not (
+      (pkg_repo_nginx_shared_with_registry | default(true) | bool)
+      and (setup_registry_nginx | default(false) | bool)
+    )
+
+- name: Remove standalone pkg-repo nginx systemd unit
+  ansible.builtin.file:
+    path: "{{ compose_systemd_unit_dir }}/{{ compose_systemd_pkg_repo_nginx_unit_name }}.service"
+    state: absent
+  register: pkg_repo_systemd_unit_removed
+  when: >-
+    not (
+      (pkg_repo_nginx_shared_with_registry | default(true) | bool)
+      and (setup_registry_nginx | default(false) | bool)
+    )
+
+- name: Remove pkg-repo nginx vhost configuration
+  ansible.builtin.file:
+    path: "{{ pkg_repo_nginx_vhosts_dir }}/pkg-repo-vhosts.conf"
+    state: absent
+  register: pkg_repo_vhosts_removed
+
+- name: Remove pkg-repo TLS renewal cron job
+  ansible.builtin.file:
+    path: /etc/cron.d/pkg-repo-tls-renew
+    state: absent
+
+- name: Remove standalone pkg-repo nginx configuration files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ pkg_repo_nginx_config_dir }}/nginx.conf"
+    - "{{ pkg_repo_nginx_compose_project_dir }}/docker-compose.yml"
+    - "{{ pkg_repo_nginx_compose_project_dir }}/issue-pkg-repo-tls-cert.sh"
+    - "{{ pkg_repo_nginx_compose_project_dir }}/renew-pkg-repo-tls-cert.sh"
+  when: >-
+    not (
+      (pkg_repo_nginx_shared_with_registry | default(true) | bool)
+      and (setup_registry_nginx | default(false) | bool)
+    )
+
+- name: Reload shared registry nginx after pkg-repo vhost removal
+  ansible.builtin.include_role:
+    name: 06-enable-compose-systemd
+    tasks_from: reload_registry_nginx.yaml
+  when:
+    - setup_registry_nginx | default(false) | bool
+    - pkg_repo_nginx_shared_with_registry | default(true) | bool
+    - pkg_repo_vhosts_removed.changed | default(false)
+
+- name: Mark registry nginx pending restart after pkg-repo teardown
+  ansible.builtin.include_role:
+    name: 06-enable-compose-systemd
+    tasks_from: mark_compose_pending_restart.yaml
+  vars:
+    compose_pending_restart_units:
+      - "{{ compose_systemd_registry_nginx_unit_name }}"
+  when:
+    - setup_registry_nginx | default(false) | bool
+    - pkg_repo_nginx_shared_with_registry | default(true) | bool
+    - >-
+      pkg_repo_vhosts_removed.changed | default(false)
+      or pkg_repo_systemd_unit_removed.changed | default(false)

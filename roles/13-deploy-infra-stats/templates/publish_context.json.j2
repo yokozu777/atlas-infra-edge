@@ -1,0 +1,43 @@
+{# Static + scrape parameters for host-side refresh_infra_stats.py #}
+{
+  "hostname": {{ infra_stats_hostname | to_json }},
+  "path": {{ infra_stats_path | to_json }},
+  "dns_domain_suffix": {{ dns_domain_suffix | default('') | to_json }},
+  "infra_stats_publish_source": {{ infra_stats_publish_source | default('compose_render') | to_json }},
+  "setup_bind": {{ setup_bind | default(false) | bool | to_json }},
+  "setup_ntp": {{ setup_ntp | default(false) | bool | to_json }},
+  "setup_stepca": {{ setup_stepca | default(false) | bool | to_json }},
+  "bind_zones_dir": {{ bind_zones_dir | default('/opt/bind/zones') | to_json }},
+  "ntp_container_name": {{ ntp_container_name | default('ntp') | to_json }},
+  "ntp_listen_ip": {{ ntp_listen_ip | default('') | to_json }},
+  "ntp_hostname": {{ ntp_hostname | default('') | to_json }},
+  "ntp_compose_project_dir": {{ ntp_compose_project_dir | default('') | to_json }},
+  "ntp_upstream_servers": {{ ntp_upstream_servers | default([]) | to_json }},
+  "stepca_data_dir": {{ stepca_data_dir | default('/opt/stepca') | to_json }},
+  "stepca_db_dir": {{ ((stepca_data_dir | default('/opt/stepca')) ~ '/db') | to_json }},
+  "cert_paths": {{ infra_stats_cert_paths | default([]) | to_json }},
+  "nginx_locations": {{ infra_stats_nginx_locations | default([]) | to_json }},
+  "pkg_repos": {{ infra_stats_pkg_repos | default([]) | to_json }},
+  "helm_repos": {{ infra_stats_helm_repos | default([]) | to_json }},
+  "docker_repos": {{ infra_stats_docker_repos | default([]) | to_json }},
+  "bind_inventory_fallback": {{ infra_stats_bind_inventory_fallback | default([]) | to_json }},
+  "setup_apt_rpm_nginx": {{ setup_apt_rpm_nginx | default(false) | bool | to_json }},
+  "setup_helm_nginx": {{ setup_helm_nginx | default(false) | bool | to_json }},
+  "setup_registry": {{ setup_registry | default(false) | bool | to_json }},
+  "setup_custom_content_nginx": {{ setup_custom_content_nginx | default(false) | bool | to_json }},
+  "pkg_repo_nginx_cache_dir": {{ pkg_repo_nginx_cache_dir | default('/opt/pkg-repo-nginx/cache') | to_json }},
+  "helm_repo_nginx_cache_dir": {{ helm_repo_nginx_cache_dir | default('/opt/helm-repo-nginx/cache') | to_json }},
+  "helm_repo_nginx_releases_dir": {{ helm_repo_nginx_releases_dir | default('/opt/helm-repo-nginx/releases') | to_json }},
+  "registry_data_dir": {{ registry_data_dir | default('/opt/registry') | to_json }},
+  "custom_nginx_www_dir": {{ custom_nginx_www_dir | default('/opt/custom-nginx/www') | to_json }},
+  "cache_html_limit": {{ infra_stats_cache_html_limit | default(200) | int }},
+  "cache_json_limit": {{ infra_stats_cache_json_limit | default(2000) | int }},
+  "pki_ca_host": {{ pki_ca_host | default('ca.' ~ (dns_domain_suffix | default('lab'))) | to_json }},
+  "ca_root_path": {{ ((stepca_data_dir | default('/opt/stepca')) ~ '/certs/root_ca.crt') | to_json }},
+  "ca_step_url": {{ ('https://' ~ (pki_ca_host | default('ca.' ~ (dns_domain_suffix | default('lab')))) ~ ':' ~ (stepca_https_port | default(8443) | string) ~ '/roots.pem') | to_json }},
+{% if pki_ca_url is defined and pki_ca_url is string %}
+  "ca_upstream_urls": {{ [pki_ca_url] | to_json }}
+{% else %}
+  "ca_upstream_urls": {{ pki_ca_url | default([]) | to_json }}
+{% endif %}
+}

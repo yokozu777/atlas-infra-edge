@@ -1,0 +1,18 @@
+---
+docker_firewalld_zone: public
+docker_firewalld_ports: []
+
+# Override these knobs via inventory / group_vars when needed.
+use_internal_docker_registry: none
+use_internal_rpm_apt_repo: none
+nexus_host: nexus.example.com
+disable_selinux: false
+
+docker_systemd_dropin_dirs:
+  - /etc/systemd/system/containerd.service.d
+  - /etc/systemd/system/docker.service.d
+
+docker_containerd_limit_nofile: 1048576
+docker_containerd_config_path: /etc/containerd/config.toml
+docker_daemon_config_path: /etc/docker/daemon.json
+docker_service_override_path: /etc/systemd/system/docker.service.d/override.conf

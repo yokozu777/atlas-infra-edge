@@ -1,0 +1,32 @@
+---
+# Dest: max(min_free_gb, /seed bytes). Work dir: 64MiB for extract.sh only.
+# Publish calls this with seed_bytes=0 → dest uses the min_free_gb floor.
+
+- name: Require enough free disk for infra cache seed dest and work dir
+  ansible.builtin.shell: |
+    set -euo pipefail
+    min_free_bytes=$(( {{ infra_cache_seed_min_free_gb | int }} * 1024 * 1024 * 1024 ))
+    seed_bytes={{ infra_cache_seed_seed_bytes | default(0) | int }}
+    dest_need="$seed_bytes"
+    if [ "$dest_need" -lt "$min_free_bytes" ]; then
+      dest_need="$min_free_bytes"
+    fi
+    work_need=$(( 64 * 1024 * 1024 ))
+    check_path() {
+      local path="$1"
+      local need="$2"
+      mkdir -p "$path"
+      local free
+      free="$(df -B1 "$path" | tail -1 | awk '{print $4}')"
+      if [ "$free" -lt "$need" ]; then
+        echo "FAIL: $path has ${free}B free (need ${need}B; seed=${seed_bytes} min_free={{ infra_cache_seed_min_free_gb | int }}G)" >&2
+        exit 1
+      fi
+    }
+    {% for item in infra_cache_seed_components | default([]) %}
+    check_path {{ item.host_dir | quote }} "$dest_need"
+    {% endfor %}
+    check_path {{ infra_cache_seed_work_dir | quote }} "$work_need"
+  args:
+    executable: /bin/bash
+  changed_when: false

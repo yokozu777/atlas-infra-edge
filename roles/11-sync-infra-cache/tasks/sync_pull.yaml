@@ -1,0 +1,21 @@
+---
+- ansible.builtin.import_tasks: build_rsync_jobs.yaml
+
+- ansible.builtin.import_tasks: rsync_serial.yaml
+  when: not (nginx_cache_sync_parallel | default(false) | bool)
+
+- ansible.builtin.import_tasks: rsync_parallel.yaml
+  when: nginx_cache_sync_parallel | default(false) | bool
+
+- name: Purge pkg-repo APT/RPM metadata nginx cache after pull (avoid mixed Release/index snapshot)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if [ -d "{{ pkg_repo_nginx_cache_dir }}/metadata" ]; then
+      find "{{ pkg_repo_nginx_cache_dir }}/metadata" -mindepth 1 -delete
+    fi
+  args:
+    executable: /bin/bash
+  when:
+    - nginx_cache_sync_direction == 'pull'
+    - nginx_cache_sync_pkg_repo_enabled | bool
+  changed_when: true

@@ -1,0 +1,214 @@
+#!/bin/bash
+# Warm pkg-repo nginx metadata cache via HTTPS vhosts (run on infra after vhost deploy).
+#
+# Modes:
+#   light (default) — anchors only (InRelease / repomd.xml); fast, deploy-safe
+#   full            — also Packages indexes + RPM primary.xml.gz (still skips sqlite)
+set -euo pipefail
+
+DEBIAN_SUITE="{{ pkg_repo_nginx_cache_warm_debian_suite }}"
+UBUNTU_SUITE="{{ pkg_repo_nginx_cache_warm_ubuntu_suite }}"
+PGDG_PG_VERSION="{{ pkg_repo_nginx_cache_warm_pgsql_version | default('18') }}"
+WARM_MODE="{{ pkg_repo_nginx_cache_warm_mode | default('light') }}"
+CURL_CONNECT="{{ pkg_repo_nginx_cache_warm_curl_connect_timeout | default(5) }}"
+CURL_MAX="{{ pkg_repo_nginx_cache_warm_curl_max_time | default(60) }}"
+# -4: prefer IPv4 to local vhosts / avoid AAAA blackholes on the host path
+CURL=(curl -4 -fsSLk --connect-timeout "${CURL_CONNECT}" --max-time "${CURL_MAX}")
+WAIT_RETRIES="{{ pkg_repo_nginx_cache_warm_wait_retries | default(60) }}"
+WAIT_DELAY="{{ pkg_repo_nginx_cache_warm_wait_delay | default(5) }}"
+FAILURES=0
+
+fetch() {
+  local url="$1"
+  echo "WARM ${url}"
+  if ! "${CURL[@]}" -o /dev/null "${url}"; then
+    echo "WARM_FAIL ${url}" >&2
+    FAILURES=$((FAILURES + 1))
+    return 1
+  fi
+  return 0
+}
+
+wait_https() {
+  local host="$1"
+  local attempt
+  for ((attempt = 1; attempt <= WAIT_RETRIES; attempt++)); do
+    if curl -4 -fsSk --connect-timeout "${CURL_CONNECT}" --max-time "${CURL_MAX}" \
+         -o /dev/null "https://${host}/repodata/repomd.xml" 2>/dev/null \
+      || curl -4 -fsSk --connect-timeout "${CURL_CONNECT}" --max-time "${CURL_MAX}" \
+         -o /dev/null "https://${host}/dists/${DEBIAN_SUITE}/InRelease" 2>/dev/null \
+      || curl -4 -fsSk --connect-timeout "${CURL_CONNECT}" --max-time "${CURL_MAX}" \
+         -o /dev/null "https://${host}/dists/${UBUNTU_SUITE}/InRelease" 2>/dev/null; then
+      return 0
+    fi
+    sleep "${WAIT_DELAY}"
+  done
+  echo "pkg-repo nginx not reachable: ${host}" >&2
+  exit 1
+}
+
+warm_rpm_repodata() {
+  local host="$1"
+  fetch "https://${host}/repodata/repomd.xml" || return 0
+  if [[ "${WARM_MODE}" != "full" ]]; then
+    return 0
+  fi
+  # Full: primary.xml.gz only (skip huge sqlite / filelists — clients fetch on demand).
+  local repomd path
+  repomd="$("${CURL[@]}" "https://${host}/repodata/repomd.xml" 2>/dev/null || true)"
+  [[ -n "${repomd}" ]] || return 0
+  mapfile -t paths < <(echo "${repomd}" | grep -oE 'href="repodata/[^"]+primary\.xml\.gz"' | sed 's/^href="//;s/"$//' | sort -u)
+  for path in "${paths[@]}"; do
+    fetch "https://${host}/${path}" || true
+  done
+}
+
+warm_debian_archive() {
+  local host="$1"
+  local suite="$2"
+  local mode="${3:-main}"
+  if [[ "${mode}" == "security" ]]; then
+    fetch "https://${host}/dists/${suite}-security/InRelease" || true
+    if [[ "${WARM_MODE}" == "full" ]]; then
+      fetch "https://${host}/dists/${suite}-security/Release" || true
+      fetch "https://${host}/dists/${suite}-security/main/binary-amd64/Packages.xz" || true
+    fi
+    return 0
+  fi
+  local comps=("main")
+  if [[ "${mode}" == "non-free" ]]; then
+    comps=(contrib non-free non-free-firmware)
+  fi
+  for suffix in "" "-updates"; do
+    fetch "https://${host}/dists/${suite}${suffix}/InRelease" || true
+    if [[ "${WARM_MODE}" == "full" ]]; then
+      fetch "https://${host}/dists/${suite}${suffix}/Release" || true
+      local comp
+      for comp in "${comps[@]}"; do
+        fetch "https://${host}/dists/${suite}${suffix}/${comp}/binary-amd64/Packages.xz" || true
+      done
+    fi
+  done
+}
+
+warm_ubuntu_archive() {
+  local host="$1"
+  local suite="$2"
+  for suffix in "" "-updates" "-backports" "-security"; do
+    fetch "https://${host}/dists/${suite}${suffix}/InRelease" || true
+    if [[ "${WARM_MODE}" == "full" ]]; then
+      fetch "https://${host}/dists/${suite}${suffix}/Release" || true
+      fetch "https://${host}/dists/${suite}${suffix}/main/binary-amd64/Packages.xz" || true
+    fi
+  done
+}
+
+warm_docker_deb() {
+  local host="$1"
+  local suite="$2"
+  fetch "https://${host}/dists/${suite}/stable/InRelease" || true
+  if [[ "${WARM_MODE}" == "full" ]]; then
+    fetch "https://${host}/dists/${suite}/stable/Release" || true
+    fetch "https://${host}/dists/${suite}/stable/binary-amd64/Packages.gz" || true
+  fi
+}
+
+warm_k8s_deb() {
+  local host="$1"
+  fetch "https://${host}/InRelease" || true
+  if [[ "${WARM_MODE}" == "full" ]]; then
+    fetch "https://${host}/Release" || true
+    fetch "https://${host}/Packages" || true
+  fi
+}
+
+warm_pgdg_apt() {
+  local host="$1"
+  local suite
+  for suite in "${DEBIAN_SUITE}" "${UBUNTU_SUITE}"; do
+    fetch "https://${host}/dists/${suite}-pgdg/InRelease" || true
+    if [[ "${WARM_MODE}" == "full" ]]; then
+      fetch "https://${host}/dists/${suite}-pgdg/Release" || true
+      fetch "https://${host}/dists/${suite}-pgdg/main/binary-amd64/Packages.gz" || true
+    fi
+  done
+}
+
+warm_pgdg_yum() {
+  local host="$1"
+  local major
+{% for major in pkg_repo_nginx_cache_warm_pgdg_rhel_majors | default([9, 10]) %}
+  major="{{ major }}"
+  fetch "https://${host}/${PGDG_PG_VERSION}/redhat/rhel-${major}-x86_64/repodata/repomd.xml" || true
+  if [[ "${WARM_MODE}" == "full" ]]; then
+    local repomd path
+    repomd="$("${CURL[@]}" "https://${host}/${PGDG_PG_VERSION}/redhat/rhel-${major}-x86_64/repodata/repomd.xml" 2>/dev/null || true)"
+    [[ -n "${repomd}" ]] || true
+    if [[ -n "${repomd}" ]]; then
+      mapfile -t paths < <(echo "${repomd}" | grep -oE 'href="repodata/[^"]+primary\.xml\.gz"' | sed 's/^href="//;s/"$//' | sort -u)
+      for path in "${paths[@]}"; do
+        fetch "https://${host}/${PGDG_PG_VERSION}/redhat/rhel-${major}-x86_64/${path}" || true
+      done
+    fi
+  fi
+{% endfor %}
+}
+
+warm_slug() {
+  local slug="$1"
+  local host="$2"
+
+  case "${slug}" in
+    debian-main)
+      warm_debian_archive "${host}" "${DEBIAN_SUITE}" main
+      ;;
+    debian-security)
+      warm_debian_archive "${host}" "${DEBIAN_SUITE}" security
+      ;;
+    debian-non-free)
+      warm_debian_archive "${host}" "${DEBIAN_SUITE}" non-free
+      ;;
+    ubuntu)
+      warm_ubuntu_archive "${host}" "${UBUNTU_SUITE}"
+      ;;
+    debian-containerd)
+      warm_docker_deb "${host}" "${DEBIAN_SUITE}"
+      ;;
+    ubuntu-containerd)
+      warm_docker_deb "${host}" "${UBUNTU_SUITE}"
+      ;;
+    gitlab-runner-ubuntu)
+      warm_docker_deb "${host}" "${UBUNTU_SUITE}"
+      ;;
+    gitlab-runner-debian)
+      warm_docker_deb "${host}" "${DEBIAN_SUITE}"
+      ;;
+    k8s-ubuntu-*)
+      warm_k8s_deb "${host}"
+      ;;
+    pgdg-apt)
+      warm_pgdg_apt "${host}"
+      ;;
+    pgdg-yum)
+      warm_pgdg_yum "${host}"
+      ;;
+    *)
+      warm_rpm_repodata "${host}"
+      ;;
+  esac
+}
+
+echo "pkg-repo cache warm mode=${WARM_MODE} curl_max=${CURL_MAX}s"
+
+{% if pkg_repo_cache_warm_slugs | default([]) | length > 0 %}
+wait_https "{{ pkg_repo_cache_warm_slugs[0] | pkg_repo_proxy_hostname(pkg_repo_nginx_ingress_domain) }}"
+{% endif %}
+
+{% for slug in pkg_repo_cache_warm_slugs %}
+warm_slug "{{ slug }}" "{{ slug | pkg_repo_proxy_hostname(pkg_repo_nginx_ingress_domain) }}"
+{% endfor %}
+
+if [[ "${FAILURES}" -gt 0 ]]; then
+  echo "pkg-repo cache warm finished with ${FAILURES} fetch failure(s) (best-effort)" >&2
+fi
+exit 0

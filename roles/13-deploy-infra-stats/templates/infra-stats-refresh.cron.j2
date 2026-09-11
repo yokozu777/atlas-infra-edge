@@ -1,0 +1,4 @@
+# Ansible managed: infra-stats HTML/JSON refresh (scrape + render)
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+{{ infra_stats_refresh_cron_minute }} {{ infra_stats_refresh_cron_hour }} {{ infra_stats_refresh_cron_dom }} {{ infra_stats_refresh_cron_month }} {{ infra_stats_refresh_cron_dow }} root {{ infra_stats_compose_project_dir }}/refresh-infra-stats.sh >> {{ infra_stats_refresh_cron_log_file }} 2>&1

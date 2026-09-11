@@ -1,0 +1,18 @@
+---
+# Parallel rsync over nginx_cache_sync_rsync_jobs in batches of parallel_jobs.
+# Any non-zero rc fails the play (stamp write is downstream and will not run).
+
+- name: Log parallel infra cache rsync plan
+  ansible.builtin.debug:
+    msg: >-
+      atlas_infra_cache_sync parallel_rsync
+      jobs={{ nginx_cache_sync_rsync_jobs | default([]) | map(attribute='name') | list | join(',') }}
+      parallel_jobs={{ nginx_cache_sync_parallel_jobs | int }}
+      timeout_sec={{ nginx_cache_sync_parallel_timeout_sec | int }}
+
+- name: Rsync infra cache jobs in parallel batches
+  ansible.builtin.include_tasks: rsync_parallel_batch.yaml
+  loop: "{{ nginx_cache_sync_rsync_jobs | default([]) | batch(nginx_cache_sync_parallel_jobs | int) | list }}"
+  loop_control:
+    loop_var: nginx_cache_sync_rsync_batch
+    label: "{{ nginx_cache_sync_rsync_batch | map(attribute='name') | list | join(',') }}"

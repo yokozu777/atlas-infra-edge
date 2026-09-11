@@ -1,0 +1,75 @@
+---
+# Optional runtime helpers (not imported from thin main.yaml).
+# Canonical path: render → mark_pending → compose_reconcile (+ reload_registry_nginx).
+
+- name: Apply registry nginx compose runtime changes
+  when: >-
+    registry_nginx_conf_deployed.changed | default(false) or
+    registry_nginx_compose_deployed.changed | default(false)
+  block:
+    - name: Check registry internal network before nginx compose restart
+      ansible.builtin.command:
+        cmd: docker network inspect {{ registry_internal_network_name }}
+      register: registry_internal_network_inspect
+      changed_when: false
+      failed_when: false
+
+    - name: Start registry compose when internal network is missing
+      ansible.builtin.systemd:
+        name: "{{ compose_systemd_registry_unit_name }}.service"
+        state: started
+        enabled: true
+      when: registry_internal_network_inspect.rc != 0
+
+    - name: Check registry nginx container state before reload/recreate
+      ansible.builtin.command:
+        cmd: docker inspect -f '{{ "{{" }}.State.Running{{ "}}" }}' {{ registry_nginx_container_name }}
+      register: registry_nginx_container_running_for_reload
+      changed_when: false
+      failed_when: false
+
+    - name: Recreate registry nginx container after compose definition change
+      ansible.builtin.command:
+        cmd: docker compose up -d --remove-orphans --force-recreate
+        chdir: "{{ registry_nginx_compose_project_dir }}"
+      register: registry_nginx_compose_recreated
+      changed_when: registry_nginx_compose_recreated.rc == 0
+      when: registry_nginx_compose_deployed.changed | default(false)
+
+    - name: Reload registry nginx after nginx.conf change
+      ansible.builtin.command:
+        cmd: docker exec {{ registry_nginx_container_name }} nginx -s reload
+      register: registry_nginx_conf_reloaded
+      changed_when: registry_nginx_conf_reloaded.rc == 0
+      failed_when: false
+      when:
+        - registry_nginx_conf_deployed.changed | default(false)
+        - not (registry_nginx_compose_deployed.changed | default(false))
+        - registry_nginx_container_running_for_reload.stdout | default('false') == 'true'
+
+    - name: Recreate registry nginx when conf changed but reload not possible
+      ansible.builtin.command:
+        cmd: docker compose up -d --remove-orphans --force-recreate
+        chdir: "{{ registry_nginx_compose_project_dir }}"
+      register: registry_nginx_compose_recreated_fallback
+      changed_when: registry_nginx_compose_recreated_fallback.rc == 0
+      when:
+        - registry_nginx_conf_deployed.changed | default(false)
+        - not (registry_nginx_compose_deployed.changed | default(false))
+        - >-
+          registry_nginx_container_running_for_reload.stdout | default('false') != 'true'
+          or (registry_nginx_conf_reloaded.rc | default(1) != 0)
+
+    - name: Mark registry nginx pending restart when conf reload failed and recreate skipped
+      ansible.builtin.include_role:
+        name: 06-enable-compose-systemd
+        tasks_from: mark_compose_pending_restart.yaml
+      vars:
+        compose_pending_restart_units:
+          - "{{ compose_systemd_registry_nginx_unit_name }}"
+      when:
+        - registry_nginx_conf_deployed.changed | default(false)
+        - not (registry_nginx_compose_deployed.changed | default(false))
+        - registry_nginx_container_running_for_reload.stdout | default('false') == 'true'
+        - registry_nginx_conf_reloaded.rc | default(1) != 0
+        - not (registry_nginx_compose_recreated_fallback.changed | default(false))

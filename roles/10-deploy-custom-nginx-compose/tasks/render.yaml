@@ -1,0 +1,185 @@
+---
+# Phase 1 render: TLS scripts/content sync/vhosts/standalone compose + mark_pending.
+# TLS cert issue needs provisioned step-ca — deferred to pre_start on cold path.
+
+- name: Require step-ca when custom nginx TLS is enabled
+  ansible.builtin.assert:
+    that:
+      - setup_stepca | default(false) | bool
+    fail_msg: custom_nginx_tls_enabled requires setup_stepca=true.
+  when: custom_nginx_tls_enabled | default(false) | bool
+
+- name: Check step-ca provision state for custom nginx TLS
+  ansible.builtin.stat:
+    path: "{{ stepca_provisioned_marker }}"
+  register: stepca_provisioned_for_custom_nginx_tls
+  when: custom_nginx_tls_enabled | default(false) | bool
+
+- name: Defer custom nginx TLS cert issue until step-ca is provisioned
+  ansible.builtin.debug:
+    msg: >-
+      step-ca not provisioned yet (missing {{ stepca_provisioned_marker }});
+      deferring custom nginx TLS issue to compose_start_registry pre_start.
+  when:
+    - custom_nginx_tls_enabled | default(false) | bool
+    - not (stepca_provisioned_for_custom_nginx_tls.stat.exists | default(false))
+
+- name: Ensure custom nginx directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ custom_nginx_config_dir }}"
+    - "{{ custom_nginx_vhosts_dir }}"
+    - "{{ custom_nginx_www_dir }}"
+    - "{{ custom_nginx_compose_project_dir }}"
+
+- name: Ensure custom nginx TLS directory exists
+  ansible.builtin.file:
+    path: "{{ custom_nginx_tls_dir }}"
+    state: directory
+    mode: "0755"
+  when: custom_nginx_tls_enabled | default(false) | bool
+
+- name: Deploy custom nginx TLS certificate issuance script
+  ansible.builtin.template:
+    src: issue-custom-nginx-tls-cert.sh.j2
+    dest: "{{ custom_nginx_compose_project_dir }}/issue-custom-nginx-tls-cert.sh"
+    mode: "0700"
+  register: custom_nginx_issue_script_deployed
+  when: custom_nginx_tls_enabled | default(false) | bool
+
+- name: Install cron package for custom nginx TLS renewal (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name: cron
+    state: present
+  when:
+    - custom_nginx_tls_enabled | default(false) | bool
+    - custom_nginx_tls_cron_enabled | default(false) | bool
+    - ansible_facts['os_family'] == 'Debian'
+
+- name: Install cron package for custom nginx TLS renewal (Red Hat family)
+  ansible.builtin.dnf:
+    name: cronie
+    state: present
+  when:
+    - custom_nginx_tls_enabled | default(false) | bool
+    - custom_nginx_tls_cron_enabled | default(false) | bool
+    - ansible_facts['os_family'] == 'RedHat'
+
+- name: Deploy custom nginx TLS renewal script
+  ansible.builtin.template:
+    src: renew-custom-nginx-tls-cert.sh.j2
+    dest: "{{ custom_nginx_compose_project_dir }}/renew-custom-nginx-tls-cert.sh"
+    mode: "0700"
+  when:
+    - custom_nginx_tls_enabled | default(false) | bool
+    - custom_nginx_tls_cron_enabled | default(false) | bool
+
+- name: Install custom nginx TLS renewal cron job
+  ansible.builtin.template:
+    src: custom-nginx-tls-renew.cron.j2
+    dest: /etc/cron.d/custom-nginx-tls-renew
+    mode: "0644"
+  when:
+    - custom_nginx_tls_enabled | default(false) | bool
+    - custom_nginx_tls_cron_enabled | default(false) | bool
+
+- name: Resolve cron systemd unit for custom nginx TLS renewal
+  ansible.builtin.set_fact:
+    custom_nginx_tls_cron_systemd_unit: >-
+      {{
+        custom_nginx_tls_cron_systemd_unit_override | default('')
+        if (custom_nginx_tls_cron_systemd_unit_override | default('') | length > 0)
+        else ('crond' if ansible_facts['os_family'] == 'RedHat' else 'cron')
+      }}
+  when:
+    - custom_nginx_tls_enabled | default(false) | bool
+    - custom_nginx_tls_cron_enabled | default(false) | bool
+
+- name: Ensure cron service is enabled for custom nginx TLS renewal
+  ansible.builtin.systemd:
+    name: "{{ custom_nginx_tls_cron_systemd_unit }}"
+    enabled: true
+    state: started
+  when:
+    - custom_nginx_tls_enabled | default(false) | bool
+    - custom_nginx_tls_cron_enabled | default(false) | bool
+
+- name: Issue custom nginx TLS when step-ca is already provisioned
+  ansible.builtin.import_tasks: issue_tls.yaml
+  when:
+    - custom_nginx_tls_enabled | default(false) | bool
+    - stepca_provisioned_for_custom_nginx_tls.stat.exists | default(false)
+
+- name: Install git for custom nginx content sync (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name: git
+    state: present
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Install git for custom nginx content sync (Oracle Linux)
+  ansible.builtin.dnf:
+    name: git
+    state: present
+  when: ansible_facts['distribution'] == 'OracleLinux'
+
+- name: Sync custom nginx static content
+  ansible.builtin.include_tasks: sync_content.yaml
+  loop: "{{ custom_nginx_content | default([]) }}"
+  loop_control:
+    loop_var: content_item
+    label: "{{ content_item.name }}"
+
+- name: Deploy custom nginx vhost configuration
+  ansible.builtin.template:
+    src: custom-nginx-vhosts.conf.j2
+    dest: "{{ custom_nginx_vhosts_dir }}/custom-nginx-vhosts.conf"
+    mode: "0644"
+  register: custom_nginx_vhosts_deployed
+
+- name: Deploy standalone custom nginx configuration
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: "{{ custom_nginx_config_dir }}/nginx.conf"
+    mode: "0644"
+  register: custom_nginx_conf_deployed
+  when:
+    - not (
+        (custom_nginx_shared_with_registry | default(true) | bool)
+        and (setup_registry_nginx | default(false) | bool)
+      )
+
+- name: Deploy standalone custom nginx docker compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ custom_nginx_compose_project_dir }}/docker-compose.yml"
+    mode: "0644"
+  register: custom_nginx_compose_deployed
+  when:
+    - not (
+        (custom_nginx_shared_with_registry | default(true) | bool)
+        and (setup_registry_nginx | default(false) | bool)
+      )
+
+- name: Mark custom nginx stack pending restart after configuration change
+  ansible.builtin.include_role:
+    name: 06-enable-compose-systemd
+    tasks_from: mark_compose_pending_restart.yaml
+  vars:
+    compose_pending_restart_units: >-
+      {{
+        [compose_systemd_custom_nginx_unit_name]
+        if not (
+          (custom_nginx_shared_with_registry | default(true) | bool)
+          and (setup_registry_nginx | default(false) | bool)
+        )
+        else [compose_systemd_registry_nginx_unit_name]
+      }}
+  when: >-
+    custom_nginx_vhosts_deployed.changed | default(false) or
+    custom_nginx_conf_deployed.changed | default(false) or
+    custom_nginx_compose_deployed.changed | default(false) or
+    custom_nginx_tls_cert_issued.changed | default(false) or
+    custom_nginx_issue_script_deployed.changed | default(false)

@@ -1,0 +1,8 @@
+---
+# Shared Phase 6 timing helper — begin. Requires compose_timing_phase.
+- name: Record compose phase start epoch
+  ansible.builtin.command:
+    cmd: date +%s
+  register: compose_timing_start
+  changed_when: false
+  when: compose_timing_enabled | default(true) | bool

@@ -1,0 +1,24 @@
+---
+# Shared Phase 6 timing helper — end + log. Requires compose_timing_phase.
+- name: Record compose phase end epoch
+  ansible.builtin.command:
+    cmd: date +%s
+  register: compose_timing_end
+  changed_when: false
+  when: compose_timing_enabled | default(true) | bool
+
+- name: Log compose phase duration
+  ansible.builtin.debug:
+    msg: >-
+      atlas_infra_edge_timing
+      phase={{ compose_timing_phase | default('unknown') }}
+      duration_s={{
+        (compose_timing_end.stdout | int)
+        - (compose_timing_start.stdout | default('0') | int)
+      }}
+  when:
+    - compose_timing_enabled | default(true) | bool
+    - compose_timing_start is defined
+    - compose_timing_start.stdout is defined
+    - compose_timing_end is defined
+    - compose_timing_end.stdout is defined

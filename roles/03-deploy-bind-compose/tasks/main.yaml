@@ -1,0 +1,5 @@
+---
+# Phase 5: thin entry — render only. Pull/start/post_start live in compose_* phases.
+# Legacy --tags 03_deploy_bind_compose still hits this file (= render + mark_pending).
+- name: Render bind compose stack files
+  ansible.builtin.import_tasks: render.yaml

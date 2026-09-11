@@ -1,0 +1,32 @@
+---
+# Restart units from this stop or a leftover hold.
+# Cold path: empty map → no-op (must not start registry before compose_start_registry).
+# Hold is cleared only after a successful start assert (or when nothing was held).
+
+- name: Reset infra cache seed started-ok
+  ansible.builtin.set_fact:
+    infra_cache_seed_started_ok: false
+
+- name: Restart stacks stopped for infra cache seed
+  ansible.builtin.include_tasks: restart_one.yaml
+  loop: "{{ infra_cache_seed_stop_targets | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - infra_cache_seed_stop_services | default(true) | bool
+    - (infra_cache_seed_stopped | default({})).get(item.name, false) | bool
+
+- ansible.builtin.include_tasks: assert_services_started.yaml
+  when:
+    - infra_cache_seed_stop_services | default(true) | bool
+    - (infra_cache_seed_stopped | default({}) | length) > 0
+
+- name: Clear infra cache seed services hold after successful restart
+  ansible.builtin.file:
+    path: "{{ infra_cache_seed_services_hold_path }}"
+    state: absent
+  when:
+    - infra_cache_seed_stop_services | default(true) | bool
+    - >-
+      ((infra_cache_seed_stopped | default({}) | length) == 0)
+      or (infra_cache_seed_started_ok | default(false) | bool)

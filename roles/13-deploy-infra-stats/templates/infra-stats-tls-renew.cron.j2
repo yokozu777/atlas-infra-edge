@@ -1,0 +1,4 @@
+# Ansible managed: infra-stats TLS certificate renewal
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+{{ infra_stats_tls_cron_minute }} {{ infra_stats_tls_cron_hour }} * * * root {{ infra_stats_compose_project_dir }}/renew-infra-stats-tls-cert.sh >> {{ infra_stats_tls_cron_log_file }} 2>&1

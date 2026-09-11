@@ -1,0 +1,8 @@
+---
+# Phase 5: render + ACME bootstrap (mid-role start). Images from compose_pull.
+# Legacy --tags 04_deploy_stepca_compose still runs bootstrap (needs a running unit).
+- name: Render step-ca compose stack files
+  ansible.builtin.import_tasks: render.yaml
+
+- name: Bootstrap step-ca (ACME init / policy / start)
+  ansible.builtin.import_tasks: bootstrap.yaml

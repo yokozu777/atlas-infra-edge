@@ -1,0 +1,23 @@
+---
+- name: Reset compose systemd bookkeeping facts
+  ansible.builtin.set_fact:
+    compose_systemd_projects: []
+
+- name: Clear compose stacks pending restart in fact cache at deploy phase start
+  ansible.builtin.import_tasks: clear_compose_pending_restart.yaml
+
+- name: Build compose systemd projects list
+  ansible.builtin.import_tasks: build_compose_systemd_projects.yaml
+
+- name: Deploy compose systemd units
+  ansible.builtin.template:
+    src: docker-compose.service.j2
+    dest: "{{ compose_systemd_unit_dir }}/{{ item.unit_name }}.service"
+    mode: "0644"
+  loop: "{{ compose_systemd_projects | default([]) }}"
+  vars:
+    compose_systemd_description: "{{ item.description }}"
+    compose_systemd_project_dir: "{{ item.project_dir }}"
+    compose_systemd_up_extra: "{{ item.up_extra }}"
+    compose_systemd_after_units: "{{ item.after_units | default('') }}"
+  notify: Reload compose systemd units

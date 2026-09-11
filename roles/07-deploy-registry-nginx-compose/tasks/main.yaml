@@ -1,0 +1,4 @@
+---
+# Phase 5: thin entry — render only. Pull/start/reload live in compose_* / reconcile.
+- name: Render registry nginx compose stack files
+  ansible.builtin.import_tasks: render.yaml

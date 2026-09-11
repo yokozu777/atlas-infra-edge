@@ -1,0 +1,62 @@
+---
+# Issue/refresh pkg-repo TLS via step-ca. Requires provisioned CA.
+# Render when CA exists; pre_start on cold path after compose_start_core.
+
+- name: Require provisioned step-ca for pkg-repo TLS
+  ansible.builtin.assert:
+    that:
+      - stepca_provisioned_for_pkg_repo_tls is defined
+      - stepca_provisioned_for_pkg_repo_tls.stat.exists | default(false)
+    fail_msg: >-
+      step-ca is not provisioned yet (missing {{ stepca_provisioned_marker }}).
+      Cold path: compose_start_core must finish before compose_start_registry.
+  when: pkg_repo_tls_enabled | default(false) | bool
+
+- name: Check pkg-repo TLS certificate file
+  ansible.builtin.stat:
+    path: "{{ pkg_repo_tls_dir }}/{{ pkg_repo_tls_cert_filename }}"
+  register: pkg_repo_tls_cert_stat
+  when: pkg_repo_tls_enabled | default(false) | bool
+
+- name: Check pkg-repo TLS wildcard SAN coverage
+  ansible.builtin.command:
+    cmd: >-
+      openssl x509 -in {{ pkg_repo_tls_dir }}/{{ pkg_repo_tls_cert_filename }}
+      -noout -ext subjectAltName
+  register: pkg_repo_tls_cert_sans
+  changed_when: false
+  when:
+    - pkg_repo_tls_enabled | default(false) | bool
+    - pkg_repo_tls_cert_stat.stat.exists | default(false)
+
+- name: Remove pkg-repo TLS certificate when SAN coverage is outdated
+  ansible.builtin.file:
+    path: "{{ pkg_repo_tls_dir }}/{{ pkg_repo_tls_cert_filename }}"
+    state: absent
+  register: pkg_repo_tls_cert_removed
+  when:
+    - pkg_repo_tls_enabled | default(false) | bool
+    - pkg_repo_tls_cert_stat.stat.exists | default(false)
+    - ('*.{{ pkg_repo_nginx_ingress_domain }}') not in pkg_repo_tls_cert_sans.stdout
+
+- name: Issue initial pkg-repo TLS certificate when missing
+  ansible.builtin.command:
+    cmd: "{{ pkg_repo_nginx_compose_project_dir }}/issue-pkg-repo-tls-cert.sh"
+  register: pkg_repo_tls_cert_issued
+  when:
+    - pkg_repo_tls_enabled | default(false) | bool
+    - not pkg_repo_tls_cert_stat.stat.exists | default(false)
+      or (pkg_repo_tls_cert_removed is defined and pkg_repo_tls_cert_removed.changed | default(false))
+  no_log: true
+  changed_when: pkg_repo_tls_cert_issued.rc == 0
+
+- name: Set pkg-repo TLS file permissions
+  ansible.builtin.file:
+    path: "{{ pkg_repo_tls_dir }}/{{ item.path }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ pkg_repo_tls_cert_filename }}"
+      mode: "0644"
+    - path: "{{ pkg_repo_tls_key_filename }}"
+      mode: "0600"
+  when: pkg_repo_tls_enabled | default(false) | bool

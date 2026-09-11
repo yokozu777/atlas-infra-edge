@@ -1,0 +1,5 @@
+---
+# Phase 5: thin entry — render only. pre_start/start/post_start live in compose_* phases.
+# Legacy --tags 12_deploy_ntp_compose still hits this file (= render + mark_pending).
+- name: Render NTP compose stack files
+  ansible.builtin.import_tasks: render.yaml

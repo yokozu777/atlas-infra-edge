@@ -1,0 +1,265 @@
+---
+# Scrape on-disk state + deploy stats.html / stats.json via host-side refresh.
+# Called from compose_render and compose_start_registry pre_start (after peer TLS).
+#
+# Scrape/render logic: templates/refresh_infra_stats.py.j2 (also used by cron).
+
+- name: Ensure infra-stats publish directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ infra_stats_scrape_dir }}"
+    - "{{ infra_stats_html_dir }}"
+    - "{{ infra_stats_html_dir }}/ca"
+    - "{{ infra_stats_compose_project_dir }}/templates"
+
+- name: Reset infra-stats summary facts
+  ansible.builtin.set_fact:
+    infra_stats_pkg_repos: []
+    infra_stats_helm_repos: []
+    infra_stats_docker_repos: []
+
+- name: Build infra-stats nginx location summary from known stacks
+  ansible.builtin.set_fact:
+    infra_stats_nginx_locations: >-
+      {{
+        [
+          {
+            'stack': 'registry',
+            'enabled': setup_registry_nginx | default(false) | bool,
+            'server_names': (
+              [registry_host | default('')]
+              + (
+                containerd_registry_mirrors | default([])
+                | rejectattr('direct', 'defined')
+                | map(attribute='dir_name')
+                | map('registry_mirror_host', registry_ingress_domain)
+                | list
+              )
+            ) | reject('equalto', '') | list,
+            'locations': [
+              {'pattern': '/', 'note': 'proxy to registry pull-through backends (per mirror hostname)'}
+            ]
+          },
+          {
+            'stack': 'pkg-repo',
+            'enabled': setup_apt_rpm_nginx | default(false) | bool,
+            'server_names': [
+              pkg_repo_nginx_host | default(''),
+              '*.' ~ (pkg_repo_nginx_ingress_domain | default(''))
+            ],
+            'locations': [
+              {'pattern': '^~ /repodata/', 'note': 'yum metadata (short cache)'},
+              {'pattern': '^~ /dists/', 'note': 'apt metadata (short cache)'},
+              {'pattern': '/', 'note': 'package blobs (long cache; 200/206 only)'}
+            ]
+          },
+          {
+            'stack': 'helm-repo',
+            'enabled': setup_helm_nginx | default(false) | bool,
+            'server_names': [
+              helm_repo_nginx_host | default(''),
+              '*.' ~ (helm_repo_nginx_ingress_domain | default(''))
+            ],
+            'locations': [
+              {'pattern': '/', 'note': 'helm index + chart blobs (proxy cache)'}
+            ]
+          },
+          {
+            'stack': 'custom',
+            'enabled': setup_custom_content_nginx | default(false) | bool,
+            'server_names': [custom_nginx_host | default('')],
+            'locations': [
+              {'pattern': '/', 'note': 'static www root'}
+            ]
+          },
+          {
+            'stack': 'infra-stats',
+            'enabled': true,
+            'server_names': [infra_stats_hostname],
+            'locations': [
+              {'pattern': '= /', 'note': '302 → ' ~ infra_stats_path},
+              {'pattern': '= ' ~ infra_stats_path, 'note': 'static stats.html'},
+              {'pattern': '= ' ~ infra_stats_path ~ '.json', 'note': 'static stats.json'},
+              {'pattern': '= /ca/roots.pem', 'note': 'lab root CA PEM'},
+              {'pattern': '= /ca/install-root-ca-debian.sh', 'note': 'Debian/Ubuntu CA install'},
+              {'pattern': '= /ca/install-root-ca-rhel.sh', 'note': 'RHEL/OL CA install'}
+            ]
+          }
+        ]
+      }}
+
+- name: Build infra-stats APT/YUM repo rows
+  ansible.builtin.set_fact:
+    infra_stats_pkg_repos: >-
+      {{
+        infra_stats_pkg_repos
+        + [{
+          'slug': upstream.slug,
+          'upstream_url': upstream.upstream_url,
+          'upstream_host': upstream.upstream_host | default(''),
+          'proxy_hostname': upstream.slug | pkg_repo_proxy_hostname(pkg_repo_nginx_ingress_domain),
+          'enable_key': 'enable_repo_' ~ (upstream.slug | replace('.', '_') | replace('-', '_')),
+          'enabled': lookup(
+            'vars',
+            'enable_repo_' ~ (upstream.slug | replace('.', '_') | replace('-', '_')),
+            default=false
+          ) | bool
+        }]
+      }}
+  loop: "{{ pkg_repo_upstreams | default([]) }}"
+  loop_control:
+    loop_var: upstream
+  when: setup_apt_rpm_nginx | default(false) | bool
+
+- name: Build infra-stats Helm repo rows
+  ansible.builtin.set_fact:
+    infra_stats_helm_repos: >-
+      {{
+        infra_stats_helm_repos
+        + [{
+          'name': upstream.name,
+          'upstream_url': upstream.upstream_url,
+          'upstream_host': upstream.upstream_host | default(''),
+          'proxy_hostname': upstream.name | helm_repo_proxy_hostname(helm_repo_nginx_ingress_domain)
+        }]
+      }}
+  loop: "{{ helm_repo_upstreams | default([]) }}"
+  loop_control:
+    loop_var: upstream
+  when: setup_helm_nginx | default(false) | bool
+
+- name: Build infra-stats Docker/registry mirror rows
+  ansible.builtin.set_fact:
+    infra_stats_docker_repos: >-
+      {{
+        infra_stats_docker_repos
+        + [{
+          'dir_name': mirror.dir_name,
+          'server': mirror.server | default(''),
+          'mirror_path': mirror.mirror_path | default(''),
+          'proxy_hostname': mirror.dir_name | registry_mirror_host(registry_ingress_domain),
+          'direct': mirror.direct | default(false) | bool
+        }]
+      }}
+  loop: "{{ containerd_registry_mirrors | default([]) }}"
+  loop_control:
+    loop_var: mirror
+  when: setup_registry_nginx | default(false) | bool
+
+- name: Build BIND inventory fallback when zone scrape is empty
+  ansible.builtin.set_fact:
+    infra_stats_bind_inventory_fallback: >-
+      {{
+        (
+          (bind_apex_static_records | default([]))
+          + (
+            bind_apex_static_records_registry | default([])
+            if (use_internal_docker_registry | default('none')) == 'registry'
+            else (
+              bind_apex_static_records_harbor | default([])
+              if (
+                (use_internal_docker_registry | default('none')) == 'harbor'
+                and (harbor_dns_ip | default('') | length) > 0
+              )
+              else []
+            )
+          )
+          + (bind_apex_static_records_repo | default([]) if (setup_apt_rpm_nginx | default(false) | bool) else [])
+          + (bind_apex_static_records_helm | default([]) if (setup_helm_nginx | default(false) | bool) else [])
+          + (bind_apex_static_records_static | default([]) if (setup_custom_content_nginx | default(false) | bool) else [])
+          + (bind_apex_static_records_stats | default([]) if (setup_infra_stats | default(false) | bool) else [])
+        )
+      }}
+
+- name: Build infra-stats known TLS certificate path list
+  ansible.builtin.set_fact:
+    infra_stats_cert_paths: >-
+      {{
+        (
+          (
+            [
+              (stepca_data_dir | default('/opt/stepca')) ~ '/certs/root_ca.crt',
+              (stepca_data_dir | default('/opt/stepca')) ~ '/certs/intermediate_ca.crt',
+            ]
+            if (setup_stepca | default(false) | bool)
+            else []
+          )
+          + (
+            [
+              (registry_tls_dir | default('/opt/registry/certs'))
+              ~ '/'
+              ~ (registry_tls_cert_filename | default('tls.crt'))
+            ]
+            if (
+              (use_internal_docker_registry | default('none')) == 'registry'
+              and (registry_tls_enabled | default(false) | bool)
+            )
+            else []
+          )
+          + (
+            [
+              (pkg_repo_tls_dir | default('/opt/pkg-repo-nginx/certs'))
+              ~ '/'
+              ~ (pkg_repo_tls_cert_filename | default('tls.crt'))
+            ]
+            if (
+              (setup_apt_rpm_nginx | default(false) | bool)
+              and (pkg_repo_tls_enabled | default(false) | bool)
+            )
+            else []
+          )
+          + (
+            [
+              (helm_repo_tls_dir | default('/opt/helm-repo-nginx/certs'))
+              ~ '/'
+              ~ (helm_repo_tls_cert_filename | default('tls.crt'))
+            ]
+            if (
+              (setup_helm_nginx | default(false) | bool)
+              and (helm_repo_tls_enabled | default(false) | bool)
+            )
+            else []
+          )
+          + (
+            [
+              (custom_nginx_tls_dir | default('/opt/custom-nginx/certs'))
+              ~ '/'
+              ~ (custom_nginx_tls_cert_filename | default('tls.crt'))
+            ]
+            if (
+              (setup_custom_content_nginx | default(false) | bool)
+              and (custom_nginx_tls_enabled | default(false) | bool)
+            )
+            else []
+          )
+          + (
+            [
+              infra_stats_tls_dir ~ '/' ~ infra_stats_tls_cert_filename
+            ]
+            if (infra_stats_tls_enabled | default(false) | bool)
+            else []
+          )
+        )
+      }}
+
+- name: Deploy infra-stats HTML Jinja template for host refresh
+  ansible.builtin.copy:
+    src: "{{ role_path }}/templates/stats.html.j2"
+    dest: "{{ infra_stats_compose_project_dir }}/templates/stats.html.j2"
+    mode: "0644"
+
+- name: Write infra-stats publish context for host refresh
+  ansible.builtin.template:
+    src: publish_context.json.j2
+    dest: "{{ infra_stats_compose_project_dir }}/publish_context.json"
+    mode: "0644"
+
+- name: Run infra-stats host refresh (scrape + render)
+  ansible.builtin.command:
+    cmd: "{{ infra_stats_compose_project_dir }}/refresh-infra-stats.sh"
+  environment:
+    INFRA_STATS_GENERATED_BY: "ansible-{{ infra_stats_publish_source | default('compose_render') }}"
+  changed_when: true

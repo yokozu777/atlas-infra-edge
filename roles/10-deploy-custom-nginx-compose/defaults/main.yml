@@ -1,0 +1,9 @@
+---
+# Override these knobs via inventory / group_vars when needed.
+
+# Optional override for cron systemd unit (empty = auto: crond on RedHat, cron on Debian).
+custom_nginx_tls_cron_systemd_unit_override: ""
+
+setup_custom_nginx: false
+setup_custom_content_nginx: false
+custom_nginx_shared_with_registry: true

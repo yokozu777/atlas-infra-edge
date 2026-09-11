@@ -1,0 +1,48 @@
+---
+# Phase 3 pre_start: free UDP/123 before starting the NTP compose unit.
+# Requires facts from render (ntp_host_chrony_unit) when possible; resolves if missing.
+
+- name: Resolve host chrony systemd unit for NTP port conflict handling
+  ansible.builtin.set_fact:
+    ntp_host_chrony_unit: >-
+      {{
+        ntp_host_chrony_unit_override | default('')
+        if (ntp_host_chrony_unit_override | default('') | length > 0)
+        else ('chrony' if ansible_facts['os_family'] == 'Debian' else 'chronyd')
+      }}
+  when: (ntp_host_chrony_unit | default('') | length) == 0
+
+- name: Stop, disable, and mask host chrony when infra NTP server uses UDP/123
+  ansible.builtin.systemd:
+    name: "{{ ntp_host_chrony_unit }}"
+    state: stopped
+    enabled: false
+    masked: true
+    daemon_reload: true
+  register: ntp_host_chrony_stopped
+  failed_when: false
+  when: ntp_disable_host_chrony | default(true) | bool
+
+- name: Detect UDP/123 listeners before NTP compose start
+  ansible.builtin.shell: ss -ulnp | grep -E ':123\b' || true
+  args:
+    executable: /bin/bash
+  register: ntp_udp_listeners_pre_deploy
+  changed_when: false
+
+- name: Check whether existing NTP compose stack already owns UDP/123
+  ansible.builtin.command:
+    cmd: docker ps --filter name=^{{ ntp_container_name }}$ --filter status=running -q
+  register: ntp_existing_container
+  changed_when: false
+  when: ntp_udp_listeners_pre_deploy.stdout | trim | length > 0
+
+- name: Fail when UDP/123 is occupied by a foreign process before NTP start
+  ansible.builtin.assert:
+    that:
+      - ntp_udp_listeners_pre_deploy.stdout | trim | length == 0
+        or (ntp_existing_container.stdout | default('') | trim | length > 0)
+    fail_msg: >-
+      UDP/123 is already in use and cannot be bound for NTP compose
+      ({{ ntp_listen_ip }}:123):
+      {{ ntp_udp_listeners_pre_deploy.stdout }}

@@ -1,0 +1,42 @@
+server {
+    listen 443 ssl;
+    server_name {{ infra_stats_hostname }};
+
+    ssl_certificate /etc/nginx/infra-stats-certs/{{ infra_stats_tls_cert_filename }};
+    ssl_certificate_key /etc/nginx/infra-stats-certs/{{ infra_stats_tls_key_filename }};
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    autoindex off;
+    client_max_body_size 1m;
+
+    location = / {
+        return 302 {{ infra_stats_path }};
+    }
+
+    location = {{ infra_stats_path }} {
+        alias {{ infra_stats_html_container_path }}/stats.html;
+        default_type text/html;
+        charset utf-8;
+    }
+
+    location = {{ infra_stats_path }}.json {
+        alias {{ infra_stats_html_container_path }}/stats.json;
+        default_type application/json;
+        charset utf-8;
+    }
+
+    location = /ca/roots.pem {
+        alias {{ infra_stats_html_container_path }}/ca/roots.pem;
+        default_type application/x-pem-file;
+    }
+
+    location = /ca/install-root-ca-debian.sh {
+        alias {{ infra_stats_html_container_path }}/ca/install-root-ca-debian.sh;
+        default_type text/x-shellscript;
+    }
+
+    location = /ca/install-root-ca-rhel.sh {
+        alias {{ infra_stats_html_container_path }}/ca/install-root-ca-rhel.sh;
+        default_type text/x-shellscript;
+    }
+}

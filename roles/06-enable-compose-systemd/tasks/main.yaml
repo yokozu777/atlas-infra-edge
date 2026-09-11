@@ -1,0 +1,8 @@
+---
+# Use playbooks/infra_hosts.yaml with include_role:
+#   tasks_from: deploy_units.yaml       — unit files only
+#   tasks_from: compose_render.yaml     — render all stacks + units (opt-in tag)
+#   tasks_from: compose_pull.yaml       — unique skip-if-present pull (opt-in tag)
+#   tasks_from: compose_start_group.yaml — start one start_group (opt-in tag)
+#   tasks_from: compose_reconcile.yaml / reconcile.yaml — slim reconcile
+- import_tasks: deploy_units.yaml

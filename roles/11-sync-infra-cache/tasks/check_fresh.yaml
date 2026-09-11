@@ -1,0 +1,153 @@
+---
+# Decide nginx_cache_sync_skip_pull for direction=pull when skip_if_fresh is enabled.
+# Must run after pre_sync (SSH ready) and before stop_services / rsync.
+
+- name: Reset infra cache sync skip-pull bookkeeping
+  ansible.builtin.set_fact:
+    nginx_cache_sync_skip_pull: false
+    nginx_cache_sync_skip_reason: not_evaluated
+    nginx_cache_sync_remote_fingerprint: ""
+    nginx_cache_sync_remote_du_stdout: ""
+
+- name: Skip freshness check when disabled or not a pull
+  ansible.builtin.set_fact:
+    nginx_cache_sync_skip_reason: >-
+      {{
+        'skip_if_fresh_disabled'
+        if not (nginx_cache_sync_skip_if_fresh | default(false) | bool)
+        else 'direction_not_pull'
+      }}
+  when: >-
+    not (nginx_cache_sync_skip_if_fresh | default(false) | bool)
+    or (nginx_cache_sync_direction | default('pull')) != 'pull'
+
+- name: Evaluate infra cache pull freshness
+  when:
+    - nginx_cache_sync_skip_if_fresh | default(false) | bool
+    - (nginx_cache_sync_direction | default('pull')) == 'pull'
+  block:
+    - name: Stat local infra cache sync stamp
+      ansible.builtin.stat:
+        path: "{{ nginx_cache_sync_stamp_path }}"
+      register: nginx_cache_sync_stamp_stat
+
+    - name: Mark pull required when local stamp is missing
+      ansible.builtin.set_fact:
+        nginx_cache_sync_skip_reason: no_local_stamp
+      when: not (nginx_cache_sync_stamp_stat.stat.exists | default(false))
+
+    - name: Read local infra cache sync stamp
+      ansible.builtin.slurp:
+        path: "{{ nginx_cache_sync_stamp_path }}"
+      register: nginx_cache_sync_stamp_slurp
+      when:
+        - nginx_cache_sync_stamp_stat.stat.exists | default(false)
+        - nginx_cache_sync_skip_reason == 'not_evaluated'
+
+    - name: Parse local infra cache sync stamp
+      when:
+        - nginx_cache_sync_stamp_stat.stat.exists | default(false)
+        - nginx_cache_sync_skip_reason == 'not_evaluated'
+      block:
+        - name: Decode local infra cache sync stamp YAML
+          ansible.builtin.set_fact:
+            nginx_cache_sync_stamp_data: "{{ nginx_cache_sync_stamp_slurp.content | b64decode | from_yaml }}"
+
+        - name: Require stamp fingerprint field
+          ansible.builtin.assert:
+            that:
+              - nginx_cache_sync_stamp_data is mapping
+              - (nginx_cache_sync_stamp_data.fingerprint | default('') | length) > 0
+            fail_msg: infra cache sync stamp missing fingerprint
+      rescue:
+        - name: Mark pull required when local stamp is unreadable
+          ansible.builtin.set_fact:
+            nginx_cache_sync_skip_reason: stamp_unreadable
+            nginx_cache_sync_stamp_data: {}
+
+    - name: Read current epoch for stamp age
+      ansible.builtin.command:
+        cmd: date +%s
+      register: nginx_cache_sync_now_epoch
+      changed_when: false
+      when:
+        - nginx_cache_sync_stamp_stat.stat.exists | default(false)
+        - nginx_cache_sync_skip_reason == 'not_evaluated'
+
+    - name: Resolve stamp age in hours
+      ansible.builtin.set_fact:
+        nginx_cache_sync_stamp_age_hours: >-
+          {{
+            (
+              (
+                (nginx_cache_sync_now_epoch.stdout | trim | int)
+                - (nginx_cache_sync_stamp_stat.stat.mtime | int)
+              ) / 3600
+            ) | float
+          }}
+      when:
+        - nginx_cache_sync_stamp_stat.stat.exists | default(false)
+        - nginx_cache_sync_skip_reason == 'not_evaluated'
+
+    - name: Mark pull required when stamp exceeds max age
+      ansible.builtin.set_fact:
+        nginx_cache_sync_skip_reason: stamp_too_old
+      when:
+        - nginx_cache_sync_stamp_stat.stat.exists | default(false)
+        - nginx_cache_sync_skip_reason == 'not_evaluated'
+        - (nginx_cache_sync_stamp_age_hours | float) > (nginx_cache_sync_fresh_max_age_hours | float)
+
+    - name: Mark pull required when stamp peer metadata drifted
+      ansible.builtin.set_fact:
+        nginx_cache_sync_skip_reason: stamp_peer_mismatch
+      when:
+        - nginx_cache_sync_stamp_stat.stat.exists | default(false)
+        - nginx_cache_sync_skip_reason == 'not_evaluated'
+        - >-
+          (nginx_cache_sync_stamp_data.remote_host | default('')) != (nginx_cache_sync_remote_host | string)
+          or (nginx_cache_sync_stamp_data.remote_port | default('') | string) != (nginx_cache_sync_remote_port | string)
+          or (nginx_cache_sync_stamp_data.remote_dir | default('')) != (nginx_cache_sync_remote_dir | string)
+          or (
+            (nginx_cache_sync_stamp_data.components | default([]))
+            | sort
+          ) != (
+            (
+              (nginx_cache_sync_components | default([]) | map(attribute='name') | list)
+              + (['registry'] if (nginx_cache_sync_registry_enabled | bool) else [])
+            )
+            | sort
+          )
+
+    - name: Compute remote fingerprint for freshness compare
+      ansible.builtin.include_tasks: compute_remote_fingerprint.yaml
+      when:
+        - nginx_cache_sync_stamp_stat.stat.exists | default(false)
+        - nginx_cache_sync_skip_reason == 'not_evaluated'
+
+    - name: Skip pull when remote fingerprint matches stamp
+      ansible.builtin.set_fact:
+        nginx_cache_sync_skip_pull: true
+        nginx_cache_sync_skip_reason: fingerprint_match
+      when:
+        - nginx_cache_sync_stamp_stat.stat.exists | default(false)
+        - nginx_cache_sync_skip_reason == 'not_evaluated'
+        - (nginx_cache_sync_remote_fingerprint | default('')) | length > 0
+        - (nginx_cache_sync_stamp_data.fingerprint | default('')) == (nginx_cache_sync_remote_fingerprint | string)
+
+    - name: Mark pull required when remote fingerprint differs
+      ansible.builtin.set_fact:
+        nginx_cache_sync_skip_reason: fingerprint_mismatch
+      when:
+        - nginx_cache_sync_stamp_stat.stat.exists | default(false)
+        - nginx_cache_sync_skip_reason == 'not_evaluated'
+        - not (nginx_cache_sync_skip_pull | default(false) | bool)
+
+- name: Log infra cache sync freshness decision
+  ansible.builtin.debug:
+    msg: >-
+      atlas_infra_cache_sync
+      {{ 'skipped_fresh' if (nginx_cache_sync_skip_pull | default(false) | bool) else 'pull' }}
+      reason={{ nginx_cache_sync_skip_reason | default('unknown') }}
+      skip_if_fresh={{ nginx_cache_sync_skip_if_fresh | default(false) | bool }}
+      stamp={{ nginx_cache_sync_stamp_path }}
+      fingerprint={{ nginx_cache_sync_remote_fingerprint | default('') | truncate(16, true, '') }}

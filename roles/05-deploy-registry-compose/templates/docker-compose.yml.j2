@@ -1,0 +1,33 @@
+networks:
+  {{ registry_internal_network_name }}:
+    name: {{ registry_internal_network_name }}
+    driver: bridge
+
+services:
+{% for proxy in registry_proxy_upstreams %}
+  {{ proxy.service_name }}:
+    image: "{{ registry_image }}"
+    container_name: "registry-{{ proxy.service_name }}"
+    restart: unless-stopped
+{% if setup_registry_nginx | default(false) | bool %}
+    expose:
+      - "{{ registry_container_port }}/tcp"
+{% else %}
+    ports:
+      - "{{ registry_listen_ip }}:{{ proxy.proxy_port }}:{{ registry_container_port }}/tcp"
+{% endif %}
+    environment:
+      REGISTRY_PROXY_REMOTEURL: {{ proxy.server }}
+      REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY: /var/lib/registry
+{% if registry_tls_enabled | default(false) | bool and not (setup_registry_nginx | default(false) | bool) %}
+      REGISTRY_HTTP_TLS_CERTIFICATE: /certs/{{ registry_tls_cert_filename }}
+      REGISTRY_HTTP_TLS_KEY: /certs/{{ registry_tls_key_filename }}
+{% endif %}
+    volumes:
+      - {{ registry_data_dir }}/{{ proxy.data_subdir }}:/var/lib/registry
+{% if registry_tls_enabled | default(false) | bool and not (setup_registry_nginx | default(false) | bool) %}
+      - {{ registry_tls_dir }}:/certs:ro
+{% endif %}
+    networks:
+      - {{ registry_internal_network_name }}
+{% endfor %}

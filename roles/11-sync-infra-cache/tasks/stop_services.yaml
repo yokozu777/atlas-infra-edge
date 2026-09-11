@@ -1,0 +1,293 @@
+---
+# Phase 3: stop only services that are actually running (cold path = no-op).
+# Sets nginx_cache_sync_stopped_* facts for post_sync restart gating.
+# A host-local hold file heals inactive units left down after a previous failed sync.
+
+- name: Reset infra cache sync stopped-service bookkeeping
+  ansible.builtin.set_fact:
+    nginx_cache_sync_stopped_registry: false
+    nginx_cache_sync_stopped_registry_nginx: false
+    nginx_cache_sync_stopped_pkg_repo_nginx: false
+    nginx_cache_sync_stopped_helm_repo_nginx: false
+    nginx_cache_sync_stopped_custom_nginx: false
+
+- ansible.builtin.import_tasks: load_services_hold.yaml
+
+- name: Probe registry compose unit before cache sync stop
+  ansible.builtin.command:
+    cmd: systemctl is-active {{ compose_systemd_registry_unit_name }}.service
+  register: nginx_cache_sync_registry_probe
+  changed_when: false
+  failed_when: false
+  when:
+    - nginx_cache_sync_registry_enabled | bool
+    - setup_compose_systemd | default(false) | bool
+
+- name: Probe registry compose containers before cache sync stop
+  ansible.builtin.command:
+    cmd: docker compose ps -q
+    chdir: "{{ registry_compose_project_dir }}"
+  register: nginx_cache_sync_registry_ps_probe
+  changed_when: false
+  failed_when: false
+  when:
+    - nginx_cache_sync_registry_enabled | bool
+    - >-
+      not (setup_compose_systemd | default(false) | bool)
+      or (nginx_cache_sync_registry_probe.stdout | default('') == 'active')
+
+- name: Stop registry nginx compose stack before infra cache sync
+  when:
+    - nginx_cache_sync_needs_registry_nginx_stop | bool
+  block:
+    - name: Probe registry nginx unit before cache sync stop
+      ansible.builtin.command:
+        cmd: systemctl is-active {{ compose_systemd_registry_nginx_unit_name }}.service
+      register: nginx_cache_sync_registry_nginx_probe
+      changed_when: false
+      failed_when: false
+      when: setup_compose_systemd | default(false) | bool
+
+    - name: Probe registry nginx compose containers before cache sync stop
+      ansible.builtin.command:
+        cmd: docker compose ps -q
+        chdir: "{{ registry_nginx_compose_project_dir }}"
+      register: nginx_cache_sync_registry_nginx_ps_probe
+      changed_when: false
+      failed_when: false
+      when: >-
+        not (setup_compose_systemd | default(false) | bool)
+        or (nginx_cache_sync_registry_nginx_probe.stdout | default('') == 'active')
+
+    - name: Stop registry nginx compose project before infra cache sync
+      ansible.builtin.command:
+        cmd: docker compose stop
+        chdir: "{{ registry_nginx_compose_project_dir }}"
+      when: >-
+        (setup_compose_systemd | default(false) | bool
+         and nginx_cache_sync_registry_nginx_probe.stdout | default('') == 'active')
+        or (
+          not (setup_compose_systemd | default(false) | bool)
+          and (nginx_cache_sync_registry_nginx_ps_probe.stdout | default('') | trim | length > 0)
+        )
+      changed_when: false
+      failed_when: false
+
+    - name: Mark registry nginx compose unit stopped before infra cache sync
+      ansible.builtin.systemd:
+        name: "{{ compose_systemd_registry_nginx_unit_name }}.service"
+        state: stopped
+      when:
+        - setup_compose_systemd | default(false) | bool
+        - nginx_cache_sync_registry_nginx_probe.stdout | default('') == 'active'
+      failed_when: false
+
+    - name: Record registry nginx was stopped for cache sync
+      ansible.builtin.set_fact:
+        nginx_cache_sync_stopped_registry_nginx: true
+      when: >-
+        (setup_compose_systemd | default(false) | bool
+         and nginx_cache_sync_registry_nginx_probe.stdout | default('') == 'active')
+        or (
+          not (setup_compose_systemd | default(false) | bool)
+          and (nginx_cache_sync_registry_nginx_ps_probe.stdout | default('') | trim | length > 0)
+        )
+
+- name: Stop standalone pkg-repo nginx compose stack before infra cache sync
+  when: nginx_cache_sync_needs_pkg_repo_nginx_stop | bool
+  block:
+    - name: Probe standalone pkg-repo nginx unit before cache sync stop
+      ansible.builtin.command:
+        cmd: systemctl is-active {{ compose_systemd_pkg_repo_nginx_unit_name }}.service
+      register: nginx_cache_sync_pkg_repo_probe
+      changed_when: false
+      failed_when: false
+      when: setup_compose_systemd | default(false) | bool
+
+    - name: Probe standalone pkg-repo nginx compose containers before cache sync stop
+      ansible.builtin.command:
+        cmd: docker compose ps -q
+        chdir: "{{ pkg_repo_nginx_compose_project_dir }}"
+      register: nginx_cache_sync_pkg_repo_ps_probe
+      changed_when: false
+      failed_when: false
+      when: >-
+        not (setup_compose_systemd | default(false) | bool)
+        or (nginx_cache_sync_pkg_repo_probe.stdout | default('') == 'active')
+
+    - name: Stop standalone pkg-repo nginx compose project before infra cache sync
+      ansible.builtin.command:
+        cmd: docker compose stop
+        chdir: "{{ pkg_repo_nginx_compose_project_dir }}"
+      when: >-
+        (setup_compose_systemd | default(false) | bool
+         and nginx_cache_sync_pkg_repo_probe.stdout | default('') == 'active')
+        or (
+          not (setup_compose_systemd | default(false) | bool)
+          and (nginx_cache_sync_pkg_repo_ps_probe.stdout | default('') | trim | length > 0)
+        )
+      changed_when: false
+      failed_when: false
+
+    - name: Mark standalone pkg-repo nginx compose unit stopped before infra cache sync
+      ansible.builtin.systemd:
+        name: "{{ compose_systemd_pkg_repo_nginx_unit_name }}.service"
+        state: stopped
+      when:
+        - setup_compose_systemd | default(false) | bool
+        - nginx_cache_sync_pkg_repo_probe.stdout | default('') == 'active'
+      failed_when: false
+
+    - name: Record standalone pkg-repo nginx was stopped for cache sync
+      ansible.builtin.set_fact:
+        nginx_cache_sync_stopped_pkg_repo_nginx: true
+      when: >-
+        (setup_compose_systemd | default(false) | bool
+         and nginx_cache_sync_pkg_repo_probe.stdout | default('') == 'active')
+        or (
+          not (setup_compose_systemd | default(false) | bool)
+          and (nginx_cache_sync_pkg_repo_ps_probe.stdout | default('') | trim | length > 0)
+        )
+
+- name: Stop standalone helm-repo nginx compose stack before infra cache sync
+  when: nginx_cache_sync_needs_helm_repo_nginx_stop | bool
+  block:
+    - name: Probe standalone helm-repo nginx unit before cache sync stop
+      ansible.builtin.command:
+        cmd: systemctl is-active {{ compose_systemd_helm_repo_nginx_unit_name }}.service
+      register: nginx_cache_sync_helm_repo_probe
+      changed_when: false
+      failed_when: false
+      when: setup_compose_systemd | default(false) | bool
+
+    - name: Probe standalone helm-repo nginx compose containers before cache sync stop
+      ansible.builtin.command:
+        cmd: docker compose ps -q
+        chdir: "{{ helm_repo_nginx_compose_project_dir }}"
+      register: nginx_cache_sync_helm_repo_ps_probe
+      changed_when: false
+      failed_when: false
+      when: >-
+        not (setup_compose_systemd | default(false) | bool)
+        or (nginx_cache_sync_helm_repo_probe.stdout | default('') == 'active')
+
+    - name: Stop standalone helm-repo nginx compose project before infra cache sync
+      ansible.builtin.command:
+        cmd: docker compose stop
+        chdir: "{{ helm_repo_nginx_compose_project_dir }}"
+      when: >-
+        (setup_compose_systemd | default(false) | bool
+         and nginx_cache_sync_helm_repo_probe.stdout | default('') == 'active')
+        or (
+          not (setup_compose_systemd | default(false) | bool)
+          and (nginx_cache_sync_helm_repo_ps_probe.stdout | default('') | trim | length > 0)
+        )
+      changed_when: false
+      failed_when: false
+
+    - name: Mark standalone helm-repo nginx compose unit stopped before infra cache sync
+      ansible.builtin.systemd:
+        name: "{{ compose_systemd_helm_repo_nginx_unit_name }}.service"
+        state: stopped
+      when:
+        - setup_compose_systemd | default(false) | bool
+        - nginx_cache_sync_helm_repo_probe.stdout | default('') == 'active'
+      failed_when: false
+
+    - name: Record standalone helm-repo nginx was stopped for cache sync
+      ansible.builtin.set_fact:
+        nginx_cache_sync_stopped_helm_repo_nginx: true
+      when: >-
+        (setup_compose_systemd | default(false) | bool
+         and nginx_cache_sync_helm_repo_probe.stdout | default('') == 'active')
+        or (
+          not (setup_compose_systemd | default(false) | bool)
+          and (nginx_cache_sync_helm_repo_ps_probe.stdout | default('') | trim | length > 0)
+        )
+
+- name: Stop standalone custom nginx compose stack before infra cache sync
+  when: nginx_cache_sync_needs_custom_nginx_stop | bool
+  block:
+    - name: Probe standalone custom nginx unit before cache sync stop
+      ansible.builtin.command:
+        cmd: systemctl is-active {{ compose_systemd_custom_nginx_unit_name }}.service
+      register: nginx_cache_sync_custom_nginx_probe
+      changed_when: false
+      failed_when: false
+      when: setup_compose_systemd | default(false) | bool
+
+    - name: Probe standalone custom nginx compose containers before cache sync stop
+      ansible.builtin.command:
+        cmd: docker compose ps -q
+        chdir: "{{ custom_nginx_compose_project_dir }}"
+      register: nginx_cache_sync_custom_nginx_ps_probe
+      changed_when: false
+      failed_when: false
+      when: >-
+        not (setup_compose_systemd | default(false) | bool)
+        or (nginx_cache_sync_custom_nginx_probe.stdout | default('') == 'active')
+
+    - name: Stop standalone custom nginx compose project before infra cache sync
+      ansible.builtin.command:
+        cmd: docker compose stop
+        chdir: "{{ custom_nginx_compose_project_dir }}"
+      when: >-
+        (setup_compose_systemd | default(false) | bool
+         and nginx_cache_sync_custom_nginx_probe.stdout | default('') == 'active')
+        or (
+          not (setup_compose_systemd | default(false) | bool)
+          and (nginx_cache_sync_custom_nginx_ps_probe.stdout | default('') | trim | length > 0)
+        )
+      changed_when: false
+      failed_when: false
+
+    - name: Mark standalone custom nginx compose unit stopped before infra cache sync
+      ansible.builtin.systemd:
+        name: "{{ compose_systemd_custom_nginx_unit_name }}.service"
+        state: stopped
+      when:
+        - setup_compose_systemd | default(false) | bool
+        - nginx_cache_sync_custom_nginx_probe.stdout | default('') == 'active'
+      failed_when: false
+
+    - name: Record standalone custom nginx was stopped for cache sync
+      ansible.builtin.set_fact:
+        nginx_cache_sync_stopped_custom_nginx: true
+      when: >-
+        (setup_compose_systemd | default(false) | bool
+         and nginx_cache_sync_custom_nginx_probe.stdout | default('') == 'active')
+        or (
+          not (setup_compose_systemd | default(false) | bool)
+          and (nginx_cache_sync_custom_nginx_ps_probe.stdout | default('') | trim | length > 0)
+        )
+
+- name: Stop registry compose stack before infra cache sync
+  when:
+    - nginx_cache_sync_registry_enabled | bool
+    - >-
+      (setup_compose_systemd | default(false) | bool
+       and nginx_cache_sync_registry_probe.stdout | default('') == 'active')
+      or (
+        not (setup_compose_systemd | default(false) | bool)
+        and (nginx_cache_sync_registry_ps_probe.stdout | default('') | trim | length > 0)
+      )
+  block:
+    - name: Stop registry compose project before infra cache sync
+      ansible.builtin.command:
+        cmd: docker compose stop
+        chdir: "{{ registry_compose_project_dir }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Mark registry compose unit stopped before infra cache sync
+      ansible.builtin.systemd:
+        name: "{{ compose_systemd_registry_unit_name }}.service"
+        state: stopped
+      when: setup_compose_systemd | default(false) | bool
+      failed_when: false
+
+    - name: Record registry was stopped for cache sync
+      ansible.builtin.set_fact:
+        nginx_cache_sync_stopped_registry: true
+
+- ansible.builtin.import_tasks: write_services_hold.yaml

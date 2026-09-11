@@ -1,0 +1,56 @@
+---
+# One batch of async rsync jobs; await all; assert every rc==0.
+
+- name: Launch parallel rsync batch
+  ansible.builtin.shell: |
+    set -euo pipefail
+    rsync -a --numeric-ids --partial{% if item.exclude_certs | default(false) | bool %} --exclude=certs{% endif %}{% if nginx_cache_sync_rsync_compress | bool %} -z{% endif %} -e {{ nginx_cache_sync_rsync_rsh | quote }} {{ item.src | quote }} {{ item.dest | quote }}
+  args:
+    executable: /bin/bash
+  async: "{{ nginx_cache_sync_parallel_timeout_sec | int }}"
+  poll: 0
+  loop: "{{ nginx_cache_sync_rsync_batch }}"
+  loop_control:
+    label: "{{ item.name }}"
+  environment: "{{ nginx_cache_sync_ssh_env | default({}) }}"
+  no_log: "{{ nginx_cache_sync_ssh_auth == 'password' }}"
+  register: nginx_cache_sync_rsync_async_launch
+
+- name: Require parallel rsync batch launch ids
+  ansible.builtin.assert:
+    that:
+      - item.ansible_job_id is defined
+      - (item.ansible_job_id | string | length) > 0
+    fail_msg: >-
+      Failed to launch parallel rsync for
+      {{ item.item.name | default('unknown') }}
+      ({{ item.msg | default(item.stderr | default('no job id')) | truncate(200, true, '…') }}).
+  loop: "{{ nginx_cache_sync_rsync_async_launch.results }}"
+  loop_control:
+    label: "{{ item.item.name | default('rsync') }}"
+
+- name: Await parallel rsync batch
+  ansible.builtin.async_status:
+    jid: "{{ item.ansible_job_id }}"
+  loop: "{{ nginx_cache_sync_rsync_async_launch.results }}"
+  loop_control:
+    label: "{{ item.item.name | default('rsync') }}"
+  register: nginx_cache_sync_rsync_async_wait
+  until: nginx_cache_sync_rsync_async_wait.finished | default(false) | bool
+  retries: "{{ ((nginx_cache_sync_parallel_timeout_sec | int) / (nginx_cache_sync_parallel_poll_sec | int)) | int }}"
+  delay: "{{ nginx_cache_sync_parallel_poll_sec | int }}"
+
+- name: Assert parallel rsync batch succeeded
+  ansible.builtin.assert:
+    that:
+      - item.finished | default(false) | bool
+      - item.rc | default(1) == 0
+    fail_msg: >-
+      Parallel rsync failed for
+      {{ item.item.name | default('unknown') }}
+      (rc={{ item.rc | default('unset') }},
+      stderr={{ item.stderr | default('') | truncate(200, true, '…') }}).
+      Fresh stamp is not written on failure.
+  loop: "{{ nginx_cache_sync_rsync_async_wait.results }}"
+  loop_control:
+    label: "{{ item.item.name | default('rsync') }}"

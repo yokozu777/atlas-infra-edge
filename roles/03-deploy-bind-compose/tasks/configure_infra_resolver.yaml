@@ -1,0 +1,79 @@
+---
+- name: Skip infra resolver configuration when disabled
+  ansible.builtin.meta: end_host
+  when: not (bind_configure_infra_resolver | default(true) | bool)
+
+- name: Check bind compose systemd unit file
+  ansible.builtin.stat:
+    path: "{{ compose_systemd_unit_dir }}/{{ compose_systemd_bind_unit_name }}.service"
+  register: bind_compose_unit_file
+
+- name: Start bind compose before configuring infra resolver
+  ansible.builtin.systemd:
+    name: "{{ compose_systemd_bind_unit_name }}.service"
+    state: started
+    enabled: true
+  when: bind_compose_unit_file.stat.exists | default(false)
+
+- name: Wait for BIND DNS on listen address
+  ansible.builtin.wait_for:
+    host: "{{ bind_infra_resolver_nameserver }}"
+    port: 53
+    timeout: "{{ bind_infra_resolver_wait_timeout | default(120) }}"
+
+- name: Check systemd-resolved unit
+  ansible.builtin.stat:
+    path: /lib/systemd/system/systemd-resolved.service
+  register: bind_systemd_resolved_unit
+
+- name: Configure infra DNS via systemd-resolved drop-in
+  when: bind_systemd_resolved_unit.stat.exists | default(false)
+  block:
+    - name: Ensure systemd-resolved drop-in directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/resolved.conf.d
+        state: directory
+        mode: "0755"
+
+    - name: Deploy systemd-resolved drop-in for local BIND
+      ansible.builtin.template:
+        src: infra-bind-resolved.conf.j2
+        dest: /etc/systemd/resolved.conf.d/infra-bind.conf
+        mode: "0644"
+      register: bind_resolved_dropin_deployed
+
+    - name: Restart systemd-resolved to apply local BIND DNS
+      ansible.builtin.systemd:
+        name: systemd-resolved
+        state: restarted
+      when: bind_resolved_dropin_deployed.changed | default(false)
+
+- name: Configure static resolv.conf when systemd-resolved is absent
+  when: not (bind_systemd_resolved_unit.stat.exists | default(false))
+  block:
+    - name: Remove immutable flag from resolv.conf
+      ansible.builtin.command: chattr -i /etc/resolv.conf
+      failed_when: false
+      changed_when: false
+
+    - name: Deploy static resolv.conf pointing at local BIND
+      ansible.builtin.template:
+        src: resolv.conf.j2
+        dest: /etc/resolv.conf
+        mode: "0644"
+      register: bind_static_resolv_deployed
+
+    - name: Protect resolv.conf from being overwritten
+      ansible.builtin.command: chattr +i /etc/resolv.conf
+      when: bind_protect_resolv_conf | default(true) | bool
+      failed_when: false
+      changed_when: true
+
+- name: Verify local BIND resolves apex zone
+  ansible.builtin.command:
+    cmd: getent hosts ca.{{ bind_search_domain | default(dns_domain_suffix) }}
+  register: bind_infra_resolver_verify
+  retries: "{{ bind_infra_resolver_verify_retries | default(10) }}"
+  delay: "{{ bind_infra_resolver_verify_delay | default(3) }}"
+  until: bind_infra_resolver_verify.rc == 0
+  changed_when: false

@@ -1,0 +1,43 @@
+---
+# Remove infra-stats vhost when setup_infra_stats is disabled (shared mount stays).
+# HTML/scrape under infra_stats_html_dir / infra_stats_scrape_dir are left as last snapshot.
+
+- name: Remove infra-stats nginx vhost configuration
+  ansible.builtin.file:
+    path: "{{ infra_stats_vhosts_dir }}/infra-stats-vhosts.conf"
+    state: absent
+  register: infra_stats_vhosts_removed
+  when: infra_stats_vhosts_dir is defined
+
+- name: Remove infra-stats TLS renewal cron job
+  ansible.builtin.file:
+    path: /etc/cron.d/infra-stats-tls-renew
+    state: absent
+
+- name: Remove infra-stats refresh cron job
+  ansible.builtin.file:
+    path: /etc/cron.d/infra-stats-refresh
+    state: absent
+
+- name: Remove infra-stats host refresh artifacts
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ infra_stats_compose_project_dir }}/refresh-infra-stats.sh"
+    - "{{ infra_stats_compose_project_dir }}/refresh_infra_stats.py"
+    - "{{ infra_stats_compose_project_dir }}/publish_context.json"
+    - "{{ infra_stats_compose_project_dir }}/templates/stats.html.j2"
+    - "{{ infra_stats_compose_project_dir }}/refresh-infra-stats.lock"
+  when: infra_stats_compose_project_dir is defined
+
+- name: Mark registry nginx pending restart after infra-stats teardown
+  ansible.builtin.include_role:
+    name: 06-enable-compose-systemd
+    tasks_from: mark_compose_pending_restart.yaml
+  vars:
+    compose_pending_restart_units:
+      - "{{ compose_systemd_registry_nginx_unit_name }}"
+  when:
+    - setup_registry_nginx | default(false) | bool
+    - infra_stats_vhosts_removed.changed | default(false)

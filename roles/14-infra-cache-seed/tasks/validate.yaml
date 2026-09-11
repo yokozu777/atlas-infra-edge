@@ -1,0 +1,27 @@
+---
+# Require docker + image:tag + at least one include for the active layer.
+# Disk: dest uses /seed bytes vs min_free_gb; work_dir uses 64MiB (validate_disk.yaml).
+# Layer flags and creds are asserted on localhost in 01_validate_vars/cache_seed.yml.
+
+- name: Require docker CLI for infra cache seed
+  ansible.builtin.command:
+    cmd: docker version --format '{{ "{{" }}.Server.Version{{ "}}" }}'
+  register: infra_cache_seed_docker_version
+  changed_when: false
+
+- name: Require seed image and immutable tag
+  ansible.builtin.assert:
+    that:
+      - infra_cache_seed_image | default('') | trim | length > 0
+      - infra_cache_seed_tag | default('') | trim | length > 0
+      - infra_cache_seed_tag | trim | lower != 'latest'
+    fail_msg: >-
+      infra cache seed requires a non-empty image and an immutable tag
+      (not latest). Store the image in an external registry reachable
+      before local Harbor/proxy start.
+
+- name: Require at least one infra cache seed component
+  ansible.builtin.assert:
+    that:
+      - (infra_cache_seed_components | default([]) | length) > 0
+    fail_msg: Enable at least one infra_cache_seed_*_include component.

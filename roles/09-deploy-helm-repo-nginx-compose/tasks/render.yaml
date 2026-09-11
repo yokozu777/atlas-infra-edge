@@ -1,0 +1,194 @@
+---
+# Phase 1 render: TLS scripts/vhosts/standalone compose + mark_pending.
+# TLS cert issue needs provisioned step-ca — deferred to pre_start on cold path.
+
+- name: Require step-ca when helm-repo TLS is enabled
+  ansible.builtin.assert:
+    that:
+      - setup_stepca | default(false) | bool
+    fail_msg: helm_repo_tls_enabled requires setup_stepca=true.
+  when: helm_repo_tls_enabled | default(false) | bool
+
+- name: Check step-ca provision state for helm-repo TLS
+  ansible.builtin.stat:
+    path: "{{ stepca_provisioned_marker }}"
+  register: stepca_provisioned_for_helm_repo_tls
+  when: helm_repo_tls_enabled | default(false) | bool
+
+- name: Defer helm-repo TLS cert issue until step-ca is provisioned
+  ansible.builtin.debug:
+    msg: >-
+      step-ca not provisioned yet (missing {{ stepca_provisioned_marker }});
+      deferring helm-repo TLS issue to compose_start_registry pre_start.
+  when:
+    - helm_repo_tls_enabled | default(false) | bool
+    - not (stepca_provisioned_for_helm_repo_tls.stat.exists | default(false))
+
+- name: Build helm repo proxy upstreams from helm_repo_upstreams
+  ansible.builtin.set_fact:
+    helm_repo_proxy_upstreams: >-
+      {{
+        helm_repo_proxy_upstreams | default([])
+        + [upstream | combine({
+          'proxy_hostname': upstream.name | helm_repo_proxy_hostname(helm_repo_nginx_ingress_domain),
+          'proxy_origin': upstream.upstream_url | helm_repo_nginx_origin,
+          'proxy_path_prefix': upstream.upstream_url | helm_repo_nginx_path_prefix,
+          'proxy_public_base': (upstream.upstream_url | helm_repo_nginx_origin) ~ (upstream.upstream_url | helm_repo_nginx_path_prefix) ~ '/',
+          'upstream_host': upstream.upstream_host,
+          'chart_hosts': upstream.upstream_host | helm_repo_chart_hosts(upstream.chart_hosts | default([]))
+        })]
+      }}
+  loop: "{{ helm_repo_upstreams }}"
+  loop_control:
+    loop_var: upstream
+
+- name: Ensure helm-repo nginx config directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ helm_repo_nginx_config_dir }}"
+    - "{{ helm_repo_nginx_vhosts_dir }}"
+    - "{{ helm_repo_nginx_cache_dir }}"
+    - "{{ helm_repo_nginx_releases_dir }}"
+    - "{{ helm_repo_nginx_compose_project_dir }}"
+
+- name: Ensure helm-repo TLS directory exists
+  ansible.builtin.file:
+    path: "{{ helm_repo_tls_dir }}"
+    state: directory
+    mode: "0755"
+  when: helm_repo_tls_enabled | default(false) | bool
+
+- name: Deploy helm-repo TLS certificate issuance script
+  ansible.builtin.template:
+    src: issue-helm-repo-tls-cert.sh.j2
+    dest: "{{ helm_repo_nginx_compose_project_dir }}/issue-helm-repo-tls-cert.sh"
+    mode: "0700"
+  register: helm_repo_issue_script_deployed
+  when: helm_repo_tls_enabled | default(false) | bool
+
+- name: Install cron package for helm-repo TLS renewal (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name: cron
+    state: present
+  when:
+    - helm_repo_tls_enabled | default(false) | bool
+    - helm_repo_tls_cron_enabled | default(false) | bool
+    - ansible_facts['os_family'] == 'Debian'
+
+- name: Install cron package for helm-repo TLS renewal (Red Hat family)
+  ansible.builtin.dnf:
+    name: cronie
+    state: present
+  when:
+    - helm_repo_tls_enabled | default(false) | bool
+    - helm_repo_tls_cron_enabled | default(false) | bool
+    - ansible_facts['os_family'] == 'RedHat'
+
+- name: Deploy helm-repo TLS renewal script
+  ansible.builtin.template:
+    src: renew-helm-repo-tls-cert.sh.j2
+    dest: "{{ helm_repo_nginx_compose_project_dir }}/renew-helm-repo-tls-cert.sh"
+    mode: "0700"
+  when:
+    - helm_repo_tls_enabled | default(false) | bool
+    - helm_repo_tls_cron_enabled | default(false) | bool
+
+- name: Install helm-repo TLS renewal cron job
+  ansible.builtin.template:
+    src: helm-repo-tls-renew.cron.j2
+    dest: /etc/cron.d/helm-repo-tls-renew
+    mode: "0644"
+  when:
+    - helm_repo_tls_enabled | default(false) | bool
+    - helm_repo_tls_cron_enabled | default(false) | bool
+
+- name: Resolve cron systemd unit for helm-repo TLS renewal
+  ansible.builtin.set_fact:
+    helm_repo_tls_cron_systemd_unit: >-
+      {{
+        helm_repo_tls_cron_systemd_unit_override | default('')
+        if (helm_repo_tls_cron_systemd_unit_override | default('') | length > 0)
+        else ('crond' if ansible_facts['os_family'] == 'RedHat' else 'cron')
+      }}
+  when:
+    - helm_repo_tls_enabled | default(false) | bool
+    - helm_repo_tls_cron_enabled | default(false) | bool
+
+- name: Ensure cron service is enabled for helm-repo TLS renewal
+  ansible.builtin.systemd:
+    name: "{{ helm_repo_tls_cron_systemd_unit }}"
+    enabled: true
+    state: started
+  when:
+    - helm_repo_tls_enabled | default(false) | bool
+    - helm_repo_tls_cron_enabled | default(false) | bool
+
+- name: Issue helm-repo TLS when step-ca is already provisioned
+  ansible.builtin.import_tasks: issue_tls.yaml
+  when:
+    - helm_repo_tls_enabled | default(false) | bool
+    - stepca_provisioned_for_helm_repo_tls.stat.exists | default(false)
+
+- name: Deploy helm-repo nginx vhost configuration
+  ansible.builtin.template:
+    src: helm-repo-vhosts.conf.j2
+    dest: "{{ helm_repo_nginx_vhosts_dir }}/helm-repo-vhosts.conf"
+    mode: "0644"
+  register: helm_repo_vhosts_deployed
+
+- name: Purge helm-repo nginx disk cache after vhost configuration change
+  ansible.builtin.shell: |
+    find "{{ helm_repo_nginx_cache_dir }}" -mindepth 1 -delete
+  args:
+    executable: /bin/bash
+  when: helm_repo_vhosts_deployed.changed | default(false)
+  changed_when: true
+  # proxy_cache only — never wipe helm_repo_nginx_releases_dir (GitHub Releases file store).
+
+- name: Deploy standalone helm-repo nginx configuration
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: "{{ helm_repo_nginx_config_dir }}/nginx.conf"
+    mode: "0644"
+  register: helm_repo_nginx_conf_deployed
+  when:
+    - not (
+        (helm_repo_nginx_shared_with_registry | default(true) | bool)
+        and (setup_registry_nginx | default(false) | bool)
+      )
+
+- name: Deploy standalone helm-repo nginx docker compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ helm_repo_nginx_compose_project_dir }}/docker-compose.yml"
+    mode: "0644"
+  register: helm_repo_compose_deployed
+  when:
+    - not (
+        (helm_repo_nginx_shared_with_registry | default(true) | bool)
+        and (setup_registry_nginx | default(false) | bool)
+      )
+
+- name: Mark helm-repo nginx stack pending restart after configuration change
+  ansible.builtin.include_role:
+    name: 06-enable-compose-systemd
+    tasks_from: mark_compose_pending_restart.yaml
+  vars:
+    compose_pending_restart_units: >-
+      {{
+        [compose_systemd_helm_repo_nginx_unit_name]
+        if not (
+          (helm_repo_nginx_shared_with_registry | default(true) | bool)
+          and (setup_registry_nginx | default(false) | bool)
+        )
+        else [compose_systemd_registry_nginx_unit_name]
+      }}
+  when: >-
+    helm_repo_vhosts_deployed.changed | default(false) or
+    helm_repo_nginx_conf_deployed.changed | default(false) or
+    helm_repo_compose_deployed.changed | default(false) or
+    helm_repo_tls_cert_issued.changed | default(false) or
+    helm_repo_issue_script_deployed.changed | default(false)

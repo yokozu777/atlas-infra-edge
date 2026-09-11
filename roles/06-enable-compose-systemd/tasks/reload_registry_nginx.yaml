@@ -1,0 +1,8 @@
+---
+- name: Reload registry nginx configuration inside running container
+  ansible.builtin.command:
+    cmd: docker exec {{ registry_nginx_container_name }} nginx -s reload
+  register: registry_nginx_config_reloaded
+  changed_when: registry_nginx_config_reloaded.rc == 0
+  failed_when: false
+  when: setup_registry_nginx | default(false) | bool

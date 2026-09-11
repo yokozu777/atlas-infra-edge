@@ -1,0 +1,12 @@
+services:
+  nginx:
+    image: "{{ custom_nginx_image }}"
+    container_name: "{{ custom_nginx_container_name }}"
+    restart: unless-stopped
+    ports:
+      - "{{ custom_nginx_listen_ip }}:{{ custom_nginx_https_port }}:443/tcp"
+    volumes:
+      - {{ custom_nginx_config_dir }}/nginx.conf:/etc/nginx/nginx.conf:ro
+      - {{ custom_nginx_vhosts_dir }}:/etc/nginx/conf.d/custom-nginx-vhosts:ro
+      - {{ custom_nginx_tls_dir }}:/etc/nginx/custom-certs:ro
+      - {{ custom_nginx_www_dir }}:/var/www/custom:ro

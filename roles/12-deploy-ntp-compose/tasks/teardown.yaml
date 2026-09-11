@@ -1,0 +1,48 @@
+---
+- name: Resolve host chrony systemd unit for NTP teardown
+  ansible.builtin.set_fact:
+    ntp_host_chrony_unit: >-
+      {{
+        ntp_host_chrony_unit_override | default('')
+        if (ntp_host_chrony_unit_override | default('') | length > 0)
+        else ('chrony' if ansible_facts['os_family'] == 'Debian' else 'chronyd')
+      }}
+
+- name: Stop NTP compose systemd unit
+  ansible.builtin.systemd:
+    name: "{{ compose_systemd_ntp_unit_name }}.service"
+    state: stopped
+    enabled: false
+    daemon_reload: true
+  failed_when: false
+
+- name: Remove NTP compose systemd unit file
+  ansible.builtin.file:
+    path: "{{ compose_systemd_unit_dir }}/{{ compose_systemd_ntp_unit_name }}.service"
+    state: absent
+
+- name: Remove NTP docker compose project files
+  ansible.builtin.file:
+    path: "{{ ntp_compose_project_dir }}/docker-compose.yml"
+    state: absent
+
+- name: Unmask host chrony before re-enable after infra NTP server teardown
+  ansible.builtin.systemd:
+    name: "{{ ntp_host_chrony_unit }}"
+    masked: false
+    daemon_reload: true
+  when:
+    - ntp_disable_host_chrony | default(true) | bool
+    - ntp_host_chrony_unit is defined
+  failed_when: false
+
+- name: Re-enable host chrony after infra NTP server teardown
+  ansible.builtin.systemd:
+    name: "{{ ntp_host_chrony_unit }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when:
+    - ntp_disable_host_chrony | default(true) | bool
+    - ntp_host_chrony_unit is defined
+  failed_when: false

@@ -1,0 +1,17 @@
+services:
+  bind:
+    restart: unless-stopped
+    container_name: "{{ bind_container_name }}"
+    hostname: "{{ bind_hostname }}"
+    image: "{{ bind_image }}"
+    environment:
+      - TZ={{ bind_container_timezone }}
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: 1
+      net.ipv6.conf.default.disable_ipv6: 1
+      net.ipv6.conf.lo.disable_ipv6: 1
+    ports:
+      - "{{ bind_listen_ip }}:53:53/tcp"
+      - "{{ bind_listen_ip }}:53:53/udp"
+    volumes:
+      - {{ bind_config_dir }}:/etc/bind

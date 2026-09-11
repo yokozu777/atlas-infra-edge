@@ -1,0 +1,34 @@
+---
+# Phase 1 render: dirs + initial compose file (may include ACME init flag).
+# ACME wait / ca.json / start-restart live in bootstrap.yaml (not render).
+
+- name: Check step-ca provision state
+  ansible.builtin.stat:
+    path: "{{ stepca_provisioned_marker }}"
+  register: stepca_provisioned_stat
+
+- name: Decide whether step-ca needs ACME init
+  ansible.builtin.set_fact:
+    stepca_needs_acme_init: "{{ not stepca_provisioned_stat.stat.exists }}"
+
+- name: Ensure step-ca data directory exists
+  ansible.builtin.file:
+    path: "{{ stepca_data_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Ensure step-ca compose project directory exists
+  ansible.builtin.file:
+    path: "{{ stepca_compose_project_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Deploy step-ca docker compose (with ACME init on first run)
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ stepca_compose_project_dir }}/docker-compose.yml"
+    mode: "0644"
+  vars:
+    stepca_init_acme: "{{ stepca_needs_acme_init }}"
+  register: stepca_compose_initial
+

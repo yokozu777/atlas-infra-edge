@@ -1,0 +1,4 @@
+---
+# Phase 5: thin entry — render only. Pull/start/warm live in compose_* phases.
+- name: Render pkg-repo nginx compose stack files
+  ansible.builtin.import_tasks: render.yaml

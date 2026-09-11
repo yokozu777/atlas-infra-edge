@@ -1,0 +1,16 @@
+---
+# Serial rsync over nginx_cache_sync_rsync_jobs (default path).
+
+- name: Rsync infra cache job (serial)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    rsync -a --numeric-ids --partial{% if item.exclude_certs | default(false) | bool %} --exclude=certs{% endif %}{% if nginx_cache_sync_rsync_compress | bool %} -z{% endif %} -e {{ nginx_cache_sync_rsync_rsh | quote }} {{ item.src | quote }} {{ item.dest | quote }}
+  args:
+    executable: /bin/bash
+  loop: "{{ nginx_cache_sync_rsync_jobs | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  environment: "{{ nginx_cache_sync_ssh_env | default({}) }}"
+  no_log: "{{ nginx_cache_sync_ssh_auth == 'password' }}"
+  register: nginx_cache_sync_rsync_serial
+  changed_when: true

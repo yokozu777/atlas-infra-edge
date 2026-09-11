@@ -1,0 +1,10 @@
+---
+# Controller workspace contract (play 00_ensure_workspace on localhost).
+# Override via group_vars/all/atlas-infra-edge.yml or env:
+#   CLUSTER_WORKSPACE_ID / CLUSTER_WORKSPACE_PARENT / CLUSTER_WORKSPACE_ROOT
+# Optional alias when orchestrating a k8s-shaped workspace id:
+#   k8s_cluster_domain (used only if cluster_domain / CLUSTER_WORKSPACE_ID unset)
+cluster_domain: infra.example.com
+cluster_workspace_id: "{{ lookup('ansible.builtin.env', 'CLUSTER_WORKSPACE_ID') | default(cluster_domain, true) }}"
+cluster_workspace_parent: "{{ lookup('ansible.builtin.env', 'CLUSTER_WORKSPACE_PARENT') | default('./workspace', true) }}"
+cluster_workspace_root: "{{ lookup('ansible.builtin.env', 'CLUSTER_WORKSPACE_ROOT') | default(cluster_workspace_parent ~ '/' ~ cluster_workspace_id, true) }}"

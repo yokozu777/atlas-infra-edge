@@ -1,0 +1,7 @@
+# Optional per-host overrides.
+# Copy to host_vars/<inventory_hostname>.yml (host_vars/* is gitignored except examples).
+#
+# hostname: infra01.example.com
+# ansible_user: localuser
+# ansible_port: 22
+# dns_server_ip: 192.0.2.10

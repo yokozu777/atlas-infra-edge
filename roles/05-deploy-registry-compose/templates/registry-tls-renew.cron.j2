@@ -1,0 +1,4 @@
+# Ansible managed: registry TLS certificate renewal (openssl checkend inside renew script)
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+{{ registry_tls_cron_minute }} {{ registry_tls_cron_hour }} * * * root {{ registry_compose_project_dir }}/renew-registry-tls-cert.sh >> {{ registry_tls_cron_log_file }} 2>&1

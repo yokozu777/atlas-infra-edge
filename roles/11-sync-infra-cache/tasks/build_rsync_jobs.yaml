@@ -1,0 +1,73 @@
+---
+# Build nginx_cache_sync_rsync_jobs for current nginx_cache_sync_direction.
+# Each job: name, src, dest, exclude_certs (registry excludes certs/).
+
+- name: Reset infra cache rsync job list
+  ansible.builtin.set_fact:
+    nginx_cache_sync_rsync_jobs: []
+
+- name: Append component rsync jobs
+  ansible.builtin.set_fact:
+    nginx_cache_sync_rsync_jobs: >-
+      {{
+        nginx_cache_sync_rsync_jobs
+        + [{
+            'name': item.name,
+            'exclude_certs': false,
+            'src': (
+              (
+                nginx_cache_sync_ssh_target ~ ':'
+                ~ nginx_cache_sync_remote_dir ~ '/' ~ item.remote_subdir ~ '/'
+              )
+              if (nginx_cache_sync_direction == 'pull')
+              else (item.local_dir ~ '/')
+            ),
+            'dest': (
+              (item.local_dir ~ '/')
+              if (nginx_cache_sync_direction == 'pull')
+              else (
+                nginx_cache_sync_ssh_target ~ ':'
+                ~ nginx_cache_sync_remote_dir ~ '/' ~ item.remote_subdir ~ '/'
+              )
+            )
+          }]
+      }}
+  loop: "{{ nginx_cache_sync_components | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Append registry rsync job
+  ansible.builtin.set_fact:
+    nginx_cache_sync_rsync_jobs: >-
+      {{
+        nginx_cache_sync_rsync_jobs
+        + [{
+            'name': 'registry',
+            'exclude_certs': true,
+            'src': (
+              (
+                nginx_cache_sync_ssh_target ~ ':'
+                ~ nginx_cache_sync_remote_dir ~ '/'
+                ~ nginx_cache_sync_remote_subdir_registry ~ '/'
+              )
+              if (nginx_cache_sync_direction == 'pull')
+              else (registry_data_dir ~ '/')
+            ),
+            'dest': (
+              (registry_data_dir ~ '/')
+              if (nginx_cache_sync_direction == 'pull')
+              else (
+                nginx_cache_sync_ssh_target ~ ':'
+                ~ nginx_cache_sync_remote_dir ~ '/'
+                ~ nginx_cache_sync_remote_subdir_registry ~ '/'
+              )
+            )
+          }]
+      }}
+  when: nginx_cache_sync_registry_enabled | bool
+
+- name: Require at least one rsync job
+  ansible.builtin.assert:
+    that:
+      - (nginx_cache_sync_rsync_jobs | default([]) | length) > 0
+    fail_msg: No infra cache rsync jobs to run (enable at least one component).

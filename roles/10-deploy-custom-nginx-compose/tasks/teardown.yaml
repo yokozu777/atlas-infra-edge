@@ -1,0 +1,73 @@
+---
+- name: Stop standalone custom nginx compose stack
+  ansible.builtin.systemd:
+    name: "{{ compose_systemd_custom_nginx_unit_name }}.service"
+    state: stopped
+    enabled: false
+    daemon_reload: true
+  failed_when: false
+  when: >-
+    not (
+      (custom_nginx_shared_with_registry | default(true) | bool)
+      and (setup_registry_nginx | default(false) | bool)
+    )
+
+- name: Remove standalone custom nginx systemd unit
+  ansible.builtin.file:
+    path: "{{ compose_systemd_unit_dir }}/{{ compose_systemd_custom_nginx_unit_name }}.service"
+    state: absent
+  register: custom_nginx_systemd_unit_removed
+  when: >-
+    not (
+      (custom_nginx_shared_with_registry | default(true) | bool)
+      and (setup_registry_nginx | default(false) | bool)
+    )
+
+- name: Remove custom nginx vhost configuration
+  ansible.builtin.file:
+    path: "{{ custom_nginx_vhosts_dir }}/custom-nginx-vhosts.conf"
+    state: absent
+  register: custom_nginx_vhosts_removed
+
+- name: Remove custom nginx TLS renewal cron job
+  ansible.builtin.file:
+    path: /etc/cron.d/custom-nginx-tls-renew
+    state: absent
+
+- name: Remove standalone custom nginx configuration files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ custom_nginx_config_dir }}/nginx.conf"
+    - "{{ custom_nginx_compose_project_dir }}/docker-compose.yml"
+    - "{{ custom_nginx_compose_project_dir }}/issue-custom-nginx-tls-cert.sh"
+    - "{{ custom_nginx_compose_project_dir }}/renew-custom-nginx-tls-cert.sh"
+  when: >-
+    not (
+      (custom_nginx_shared_with_registry | default(true) | bool)
+      and (setup_registry_nginx | default(false) | bool)
+    )
+
+- name: Reload shared registry nginx after custom nginx vhost removal
+  ansible.builtin.include_role:
+    name: 06-enable-compose-systemd
+    tasks_from: reload_registry_nginx.yaml
+  when:
+    - setup_registry_nginx | default(false) | bool
+    - custom_nginx_shared_with_registry | default(true) | bool
+    - custom_nginx_vhosts_removed.changed | default(false)
+
+- name: Mark registry nginx pending restart after custom nginx teardown
+  ansible.builtin.include_role:
+    name: 06-enable-compose-systemd
+    tasks_from: mark_compose_pending_restart.yaml
+  vars:
+    compose_pending_restart_units:
+      - "{{ compose_systemd_registry_nginx_unit_name }}"
+  when:
+    - setup_registry_nginx | default(false) | bool
+    - custom_nginx_shared_with_registry | default(true) | bool
+    - >-
+      custom_nginx_vhosts_removed.changed | default(false)
+      or custom_nginx_systemd_unit_removed.changed | default(false)

@@ -1,0 +1,1186 @@
+#!/usr/bin/env python3
+"""Scrape BIND/NTP/certs/cache and render infra-stats HTML/JSON.
+
+Invoked by refresh-infra-stats.sh (Ansible publish + cron). Soft-fail/stale
+semantics match the former scrape.yaml contract.
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+from jinja2 import Environment, FileSystemLoader
+
+HUB_TOKEN_URL = (
+    "https://auth.docker.io/token"
+    "?service=registry.docker.io"
+    "&scope=repository:ratelimitpreview/test:pull"
+)
+HUB_MANIFEST_URL = (
+    "https://registry-1.docker.io/v2/ratelimitpreview/test/manifests/latest"
+)
+
+
+def _atomic_json(path: str, data) -> None:
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, path)
+        tmp = None
+    finally:
+        if tmp and os.path.isfile(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _load_list(path: str):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, list) else None
+    except Exception:
+        return None
+
+
+def _nonempty_list(path: str) -> bool:
+    data = _load_list(path)
+    return bool(data)
+
+
+def _load_obj(path: str):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _parse_ratelimit_header(raw: str):
+    """Parse '100;w=21600' → (100, 21600)."""
+    if not raw:
+        return None, None
+    part = raw.split(",")[0].strip()
+    num_s, _, rest = part.partition(";")
+    try:
+        value = int(num_s.strip())
+    except ValueError:
+        value = None
+    window = None
+    for bit in rest.split(";"):
+        bit = bit.strip()
+        if bit.startswith("w="):
+            try:
+                window = int(bit[2:])
+            except ValueError:
+                window = None
+    return value, window
+
+
+def _cleanup_tmp(scrape_dir: str) -> None:
+    p = Path(scrape_dir)
+    if not p.is_dir():
+        return
+    for orphan in p.glob("*.json.tmp"):
+        try:
+            orphan.unlink()
+        except OSError:
+            pass
+    legacy = Path(os.environ.get("INFRA_STATS_HTML_DIR", "")) / ".scrape"
+    if legacy.exists():
+        try:
+            if legacy.is_dir():
+                for child in legacy.iterdir():
+                    child.unlink(missing_ok=True)
+                legacy.rmdir()
+            else:
+                legacy.unlink()
+        except OSError:
+            pass
+
+
+def _run(argv):
+    return subprocess.run(argv, capture_output=True, text=True, check=False)
+
+
+def scrape_bind(zones_dir: str, out: str) -> None:
+    zones = []
+    if os.path.isdir(zones_dir):
+        for name in sorted(os.listdir(zones_dir)):
+            if not name.endswith(".db"):
+                continue
+            path = os.path.join(zones_dir, name)
+            zone = name[:-3]
+            records = []
+            try:
+                text = open(path, encoding="utf-8", errors="replace").read()
+            except OSError:
+                continue
+            for line in text.splitlines():
+                line = line.strip()
+                if not line or line.startswith(";") or line.startswith("$"):
+                    continue
+                if line in ("(", ")"):
+                    continue
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                idx = 1
+                if parts[1].isdigit():
+                    idx = 2
+                if idx < len(parts) and parts[idx] == "IN":
+                    idx += 1
+                if idx >= len(parts):
+                    continue
+                typ = parts[idx]
+                if typ not in ("A", "AAAA", "NS", "CNAME", "TXT", "MX", "PTR", "SRV"):
+                    continue
+                rdata = " ".join(parts[idx + 1 :])
+                records.append({"name": parts[0], "type": typ, "rdata": rdata})
+            zones.append({"zone": zone, "path": path, "records": records})
+    _atomic_json(out, zones)
+
+
+def scrape_ntp(ctx: dict, out: str) -> None:
+    container = ctx.get("ntp_container_name") or "ntp"
+    listen_ip = ctx.get("ntp_listen_ip") or ""
+    hostname = ctx.get("ntp_hostname") or ""
+    compose_dir = ctx.get("ntp_compose_project_dir") or ""
+    upstreams = list(ctx.get("ntp_upstream_servers") or [])
+
+    ps = _run(
+        [
+            "docker",
+            "ps",
+            "--filter",
+            f"name=^{container}$",
+            "--filter",
+            "status=running",
+            "-q",
+        ]
+    )
+    running = bool((ps.stdout or "").strip()) and ps.returncode == 0
+    tracking = {}
+    sources = []
+    if running:
+        tr = _run(["docker", "exec", container, "chronyc", "-c", "tracking"])
+        if tr.returncode != 0:
+            raise RuntimeError(
+                f"chronyc tracking failed: {(tr.stderr or tr.stdout or '').strip()}"
+            )
+        # chronyc -c tracking CSV:
+        #   ≤4.5 (13): RefID, Stratum, RefTime, …
+        #   ≥4.6 (14): RefID, RefName/IP, Stratum, …
+        tline = (tr.stdout or "").strip().splitlines()
+        if not tline:
+            raise RuntimeError("chronyc tracking returned empty output")
+        cols = tline[0].split(",")
+        if len(cols) < 13:
+            raise RuntimeError(f"unexpected chronyc tracking CSV: {tline[0]!r}")
+        o = 1 if len(cols) >= 14 else 0
+        ref_name = cols[1] if o else ""
+        tracking = {
+            "reference": cols[0],
+            "reference_name": ref_name,
+            "stratum": int(float(cols[1 + o])) if cols[1 + o] else None,
+            "ref_time_utc": cols[2 + o],
+            "system_time_offset": float(cols[3 + o]) if cols[3 + o] else None,
+            "last_offset": float(cols[4 + o]) if cols[4 + o] else None,
+            "rms_offset": float(cols[5 + o]) if cols[5 + o] else None,
+            "frequency_ppm": float(cols[6 + o]) if cols[6 + o] else None,
+            "residual_freq_ppm": float(cols[7 + o]) if cols[7 + o] else None,
+            "skew_ppm": float(cols[8 + o]) if cols[8 + o] else None,
+            "root_delay": float(cols[9 + o]) if cols[9 + o] else None,
+            "root_dispersion": float(cols[10 + o]) if cols[10 + o] else None,
+            "update_interval": float(cols[11 + o]) if cols[11 + o] else None,
+            "leap": cols[12 + o],
+        }
+        src = _run(["docker", "exec", container, "chronyc", "-c", "sources"])
+        if src.returncode != 0:
+            raise RuntimeError(
+                f"chronyc sources failed: {(src.stderr or src.stdout or '').strip()}"
+            )
+        for line in (src.stdout or "").strip().splitlines():
+            if not line.strip():
+                continue
+            c = line.split(",")
+            if len(c) < 8:
+                continue
+            row = {
+                "mode": c[0],
+                "state": c[1],
+                "name": c[2],
+                "stratum": int(float(c[3])) if c[3] else None,
+                "poll": int(float(c[4])) if c[4] else None,
+                "reach": c[5],
+                "last_rx": c[6],
+                "last_sample_offset": c[7],
+            }
+            if len(c) > 8:
+                row["last_sample_error"] = c[8]
+            sources.append(row)
+    elif ps.returncode != 0:
+        raise RuntimeError(
+            f"docker ps failed: {(ps.stderr or ps.stdout or '').strip()}"
+        )
+    else:
+        raise RuntimeError(f"NTP container {container!r} is not running")
+
+    _atomic_json(
+        out,
+        [
+            {
+                "container": container,
+                "hostname": hostname,
+                "listen_ip": listen_ip,
+                "compose_dir": compose_dir,
+                "upstreams_configured": upstreams,
+                "running": running,
+                "tracking": tracking,
+                "sources": sources,
+            }
+        ],
+    )
+
+
+def openssl_meta(path: str, inform: str = "PEM") -> dict:
+    base = [
+        "openssl",
+        "x509",
+        "-in",
+        path,
+        "-inform",
+        inform,
+        "-noout",
+        "-subject",
+        "-issuer",
+        "-dates",
+        "-serial",
+    ]
+    try:
+        outp = subprocess.check_output(
+            base + ["-ext", "subjectAltName"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError:
+        outp = subprocess.check_output(base, text=True, stderr=subprocess.DEVNULL)
+    meta = {"path": path, "present": True} if inform == "PEM" else {}
+    sans = []
+    for line in outp.splitlines():
+        line = line.strip()
+        if line.startswith("X509v3 Subject Alternative Name"):
+            continue
+        if "DNS:" in line or "IP Address:" in line:
+            for part in line.split(", "):
+                part = part.strip()
+                if part.startswith("DNS:"):
+                    sans.append(part[4:])
+                elif part.startswith("IP Address:"):
+                    sans.append(part.split(":", 1)[1].strip())
+            continue
+        if "=" in line and not line.startswith("X509v3"):
+            key, _, val = line.partition("=")
+            key = key.strip().lower()
+            if key in ("subject", "issuer", "notbefore", "notafter", "serial"):
+                meta[key] = val.strip()
+    if sans:
+        meta["sans"] = sans
+    return meta
+
+
+def scrape_known_certs(paths, out: str) -> None:
+    rows = []
+    for path in paths:
+        path = (path or "").strip()
+        if not path:
+            continue
+        if not os.path.isfile(path):
+            rows.append({"path": path, "present": False})
+            continue
+        try:
+            rows.append(openssl_meta(path))
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            rows.append({"path": path, "present": True, "error": str(exc)})
+    _atomic_json(out, rows)
+
+
+def der_len_and_total(data: bytes, i: int):
+    """Return (content_len, total_bytes) for SEQUENCE at i, or None."""
+    if i + 1 >= len(data) or data[i] != 0x30:
+        return None
+    tag = data[i + 1]
+    if tag == 0x81:
+        if i + 2 >= len(data):
+            return None
+        length = data[i + 2]
+        return length, 3 + length
+    if tag == 0x82:
+        if i + 3 >= len(data):
+            return None
+        length = (data[i + 2] << 8) | data[i + 3]
+        return length, 4 + length
+    return None
+
+
+def scrape_issued(db_dir: str, out: str) -> None:
+    db = Path(db_dir)
+    rows = []
+    if not db.is_dir():
+        _atomic_json(out, rows)
+        return
+
+    data = b""
+    for p in sorted(db.glob("*.vlog")) + sorted(db.glob("*.sst")):
+        data += p.read_bytes()
+
+    seen = set()
+    i = 0
+    while i < len(data) - 4:
+        parsed = der_len_and_total(data, i)
+        if parsed is None:
+            i += 1
+            continue
+        length, total = parsed
+        if length < 200 or length > 20000 or i + total > len(data):
+            i += 1
+            continue
+        blob = data[i : i + total]
+        with tempfile.NamedTemporaryFile(delete=False) as fh:
+            fh.write(blob)
+            der_tmp = fh.name
+        try:
+            meta = openssl_meta(der_tmp, inform="DER")
+            serial = meta.get("serial", "")
+            if serial and serial not in seen:
+                seen.add(serial)
+                meta["source"] = "step-ca-db"
+                rows.append(meta)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+        finally:
+            os.unlink(der_tmp)
+        i += max(total, 1)
+
+    rows.sort(key=lambda r: (r.get("notbefore", ""), r.get("subject", "")))
+    _atomic_json(out, rows)
+
+
+def _size_human(n: int) -> str:
+    n = int(n or 0)
+    for unit, div in (("GiB", 1024**3), ("MiB", 1024**2), ("KiB", 1024)):
+        if n >= div:
+            return f"{n / div:.1f} {unit}"
+    return f"{n} B"
+
+
+def _fmt_mtime(ts: float | None) -> str:
+    if not ts:
+        return ""
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _skip_name(name: str) -> bool:
+    return name.startswith(".") or name.endswith(".tmp")
+
+
+def nginx_cache_key(path: str) -> str | None:
+    """Read nginx proxy_cache KEY header (host+uri). Incomplete files return None."""
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read(16384)
+    except OSError:
+        return None
+    marker = b"\nKEY: "
+    idx = data.find(marker)
+    if idx >= 0:
+        rest = data[idx + len(marker) :]
+    else:
+        idx = data.find(b"KEY: ")
+        if idx < 0:
+            return None
+        rest = data[idx + 5 :]
+    end = rest.find(b"\n")
+    if end < 0:
+        return None
+    key = rest[:end].decode("utf-8", "replace").strip()
+    return key or None
+
+
+def _walk_files(root: Path):
+    if not root.is_dir():
+        return
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not _skip_name(d)]
+        for name in filenames:
+            if _skip_name(name):
+                continue
+            yield Path(dirpath) / name
+
+
+def _stat_file(path: Path):
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if not os.path.isfile(path):
+        return None
+    return st
+
+
+def _trim_objects(objects: list, json_limit: int) -> tuple[list, int, bool]:
+    objects.sort(key=lambda r: r.get("mtime") or "", reverse=True)
+    total = len(objects)
+    truncated = total > json_limit
+    return objects[:json_limit], total, truncated
+
+
+def _tree_row(
+    tree_id: str,
+    path: str,
+    present: bool,
+    bytes_n: int,
+    files: int,
+    newest: float | None,
+    objects: list,
+    json_limit: int,
+    extra: dict | None = None,
+) -> dict:
+    kept, total, truncated = _trim_objects(objects, json_limit)
+    row = {
+        "id": tree_id,
+        "path": path,
+        "present": present,
+        "bytes": bytes_n,
+        "size_human": _size_human(bytes_n),
+        "files": files,
+        "newest": _fmt_mtime(newest) if present else "",
+        "objects": kept,
+        "object_count": total,
+        "truncated": truncated,
+    }
+    if extra:
+        row.update(extra)
+    return row
+
+
+def _scan_nginx_cache(root: Path, json_limit: int) -> tuple[int, int, float | None, list]:
+    bytes_n = 0
+    files = 0
+    newest = None
+    objects: list = []
+    for path in _walk_files(root):
+        st = _stat_file(path)
+        if st is None:
+            continue
+        files += 1
+        bytes_n += st.st_size
+        if newest is None or st.st_mtime > newest:
+            newest = st.st_mtime
+        key = nginx_cache_key(str(path))
+        if not key:
+            continue
+        objects.append(
+            {
+                "name": key,
+                "bytes": st.st_size,
+                "size_human": _size_human(st.st_size),
+                "mtime": _fmt_mtime(st.st_mtime),
+            }
+        )
+    return bytes_n, files, newest, objects
+
+
+def _scan_named_files(root: Path, json_limit: int) -> tuple[int, int, float | None, list]:
+    bytes_n = 0
+    files = 0
+    newest = None
+    objects: list = []
+    store = root.resolve()
+    for path in _walk_files(root):
+        st = _stat_file(path)
+        if st is None:
+            continue
+        files += 1
+        bytes_n += st.st_size
+        if newest is None or st.st_mtime > newest:
+            newest = st.st_mtime
+        try:
+            rel = str(path.resolve().relative_to(store))
+        except ValueError:
+            rel = path.name
+        objects.append(
+            {
+                "name": rel,
+                "bytes": st.st_size,
+                "size_human": _size_human(st.st_size),
+                "mtime": _fmt_mtime(st.st_mtime),
+            }
+        )
+    return bytes_n, files, newest, objects
+
+
+def _dir_totals(root: Path) -> tuple[int, int, float | None]:
+    bytes_n = 0
+    files = 0
+    newest = None
+    for path in _walk_files(root):
+        st = _stat_file(path)
+        if st is None:
+            continue
+        files += 1
+        bytes_n += st.st_size
+        if newest is None or st.st_mtime > newest:
+            newest = st.st_mtime
+    return bytes_n, files, newest
+
+
+def _scan_custom_www(root: Path, json_limit: int) -> tuple[int, int, float | None, list]:
+    bytes_n, files, newest = _dir_totals(root)
+    objects: list = []
+
+    def add_entry(name: str, target: Path) -> None:
+        if target.is_file():
+            st = _stat_file(target)
+            if st is None:
+                return
+            objects.append(
+                {
+                    "name": name,
+                    "bytes": st.st_size,
+                    "size_human": _size_human(st.st_size),
+                    "mtime": _fmt_mtime(st.st_mtime),
+                }
+            )
+            return
+        t_bytes, t_files, t_newest = _dir_totals(target)
+        objects.append(
+            {
+                "name": name,
+                "bytes": t_bytes,
+                "size_human": _size_human(t_bytes),
+                "mtime": _fmt_mtime(t_newest),
+                "files": t_files,
+            }
+        )
+
+    try:
+        children = sorted(root.iterdir(), key=lambda p: p.name)
+    except OSError:
+        children = []
+    for child in children:
+        if _skip_name(child.name):
+            continue
+        if child.is_file():
+            add_entry(child.name, child)
+            continue
+        if not child.is_dir():
+            continue
+        try:
+            subs = [s for s in child.iterdir() if not _skip_name(s.name)]
+        except OSError:
+            add_entry(child.name, child)
+            continue
+        subdirs = [s for s in subs if s.is_dir()]
+        subfiles = [s for s in subs if s.is_file()]
+        if subdirs and not subfiles:
+            for sub in sorted(subdirs, key=lambda p: p.name):
+                add_entry(f"{child.name}/{sub.name}", sub)
+        else:
+            add_entry(child.name, child)
+    return bytes_n, files, newest, objects
+
+
+def _scan_registry(root: Path, json_limit: int) -> tuple[int, int, float | None, list, list]:
+    bytes_n = 0
+    files = 0
+    newest = None
+    objects: list = []
+    upstreams: list = []
+    marker = "/_manifests/tags/"
+    try:
+        children = sorted(root.iterdir(), key=lambda p: p.name)
+    except OSError:
+        children = []
+    for upstream in children:
+        if not upstream.is_dir() or upstream.name == "certs" or _skip_name(upstream.name):
+            continue
+        u_bytes, u_files, u_newest = _dir_totals(upstream)
+        bytes_n += u_bytes
+        files += u_files
+        if u_newest and (newest is None or u_newest > newest):
+            newest = u_newest
+        tag_count = 0
+        repos = upstream / "docker" / "registry" / "v2" / "repositories"
+        if repos.is_dir():
+            for dirpath, dirnames, _filenames in os.walk(repos):
+                dirnames[:] = [d for d in dirnames if not _skip_name(d)]
+                rel = os.path.relpath(dirpath, repos).replace("\\", "/")
+                if marker not in f"/{rel}/":
+                    continue
+                name, _, tag = rel.partition("/_manifests/tags/")
+                if not name or not tag or "/" in tag:
+                    continue
+                try:
+                    st = os.stat(dirpath)
+                except OSError:
+                    continue
+                tag_count += 1
+                objects.append(
+                    {
+                        "name": f"{name}:{tag}",
+                        "bytes": 0,
+                        "size_human": "",
+                        "mtime": _fmt_mtime(st.st_mtime),
+                        "upstream": upstream.name,
+                    }
+                )
+        upstreams.append(
+            {
+                "id": upstream.name,
+                "bytes": u_bytes,
+                "size_human": _size_human(u_bytes),
+                "files": u_files,
+                "newest": _fmt_mtime(u_newest),
+                "tags": tag_count,
+            }
+        )
+    return bytes_n, files, newest, objects, upstreams
+
+
+def scrape_cache(ctx: dict, out: str) -> None:
+    json_limit = int(ctx.get("cache_json_limit") or 2000)
+    if json_limit < 1:
+        json_limit = 2000
+    trees: list = []
+
+    def add_nginx(tree_id: str, path: str, enabled: bool) -> None:
+        if not enabled:
+            return
+        root = Path(path)
+        present = root.is_dir()
+        if not present:
+            trees.append(
+                _tree_row(tree_id, path, False, 0, 0, None, [], json_limit)
+            )
+            return
+        bytes_n, files, newest, objects = _scan_nginx_cache(root, json_limit)
+        trees.append(
+            _tree_row(tree_id, path, True, bytes_n, files, newest, objects, json_limit)
+        )
+
+    def add_files(tree_id: str, path: str, enabled: bool) -> None:
+        if not enabled:
+            return
+        root = Path(path)
+        present = root.is_dir()
+        if not present:
+            trees.append(
+                _tree_row(tree_id, path, False, 0, 0, None, [], json_limit)
+            )
+            return
+        bytes_n, files, newest, objects = _scan_named_files(root, json_limit)
+        trees.append(
+            _tree_row(tree_id, path, True, bytes_n, files, newest, objects, json_limit)
+        )
+
+    pkg_enabled = bool(ctx.get("setup_apt_rpm_nginx"))
+    helm_enabled = bool(ctx.get("setup_helm_nginx"))
+    registry_enabled = bool(ctx.get("setup_registry"))
+    www_enabled = bool(ctx.get("setup_custom_content_nginx"))
+
+    pkg_root = ctx.get("pkg_repo_nginx_cache_dir") or "/opt/pkg-repo-nginx/cache"
+    add_nginx("pkg-metadata", os.path.join(pkg_root, "metadata"), pkg_enabled)
+    add_nginx("pkg-blobs", os.path.join(pkg_root, "blobs"), pkg_enabled)
+    add_nginx(
+        "helm-repo",
+        ctx.get("helm_repo_nginx_cache_dir") or "/opt/helm-repo-nginx/cache",
+        helm_enabled,
+    )
+    add_files(
+        "helm-releases",
+        ctx.get("helm_repo_nginx_releases_dir") or "/opt/helm-repo-nginx/releases",
+        helm_enabled,
+    )
+
+    if registry_enabled:
+        reg_path = ctx.get("registry_data_dir") or "/opt/registry"
+        root = Path(reg_path)
+        present = root.is_dir()
+        if not present:
+            trees.append(_tree_row("registry", reg_path, False, 0, 0, None, [], json_limit))
+        else:
+            b, f, n, objects, upstreams = _scan_registry(root, json_limit)
+            trees.append(
+                _tree_row(
+                    "registry",
+                    reg_path,
+                    True,
+                    b,
+                    f,
+                    n,
+                    objects,
+                    json_limit,
+                    extra={"upstreams": upstreams},
+                )
+            )
+
+    if www_enabled:
+        www_path = ctx.get("custom_nginx_www_dir") or "/opt/custom-nginx/www"
+        root = Path(www_path)
+        present = root.is_dir()
+        if not present:
+            trees.append(
+                _tree_row("custom-www", www_path, False, 0, 0, None, [], json_limit)
+            )
+        else:
+            b, f, n, objects = _scan_custom_www(root, json_limit)
+            trees.append(
+                _tree_row("custom-www", www_path, True, b, f, n, objects, json_limit)
+            )
+
+    _atomic_json(out, trees)
+
+
+def scrape_docker_hub(out: str) -> None:
+    req = urllib.request.Request(HUB_TOKEN_URL, method="GET")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    token = body.get("token") or body.get("access_token")
+    if not token:
+        raise RuntimeError("docker hub token empty")
+    head = urllib.request.Request(
+        HUB_MANIFEST_URL,
+        method="HEAD",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    with urllib.request.urlopen(head, timeout=10) as resp:
+        headers = {k.lower(): v for k, v in resp.headers.items()}
+    limit, limit_w = _parse_ratelimit_header(headers.get("ratelimit-limit", ""))
+    remaining, rem_w = _parse_ratelimit_header(
+        headers.get("ratelimit-remaining", "")
+    )
+    payload = {
+        "ok": remaining is not None,
+        "remaining": remaining,
+        "limit": limit,
+        "window_sec": rem_w or limit_w,
+        "reset": headers.get("ratelimit-reset"),
+        "source": headers.get("docker-ratelimit-source") or "anonymous",
+        "error": None,
+        "stale": False,
+    }
+    if remaining is None:
+        raise RuntimeError("docker hub RateLimit-Remaining missing")
+    _atomic_json(out, payload)
+
+
+def soft_scrape_obj(out: str, scrape_fn) -> tuple[bool, bool]:
+    """Return (ok, stale) for a JSON object snapshot (Docker Hub quota)."""
+    try:
+        scrape_fn()
+        return True, False
+    except Exception as exc:
+        print(f"scrape soft-fail {out}: {exc}", file=sys.stderr)
+        prev = _load_obj(out)
+        if isinstance(prev, dict) and prev.get("remaining") is not None:
+            kept = dict(prev)
+            kept["ok"] = False
+            kept["error"] = str(exc)
+            kept["stale"] = True
+            _atomic_json(out, kept)
+            return False, True
+        _atomic_json(
+            out,
+            {
+                "ok": False,
+                "remaining": None,
+                "limit": None,
+                "window_sec": None,
+                "reset": None,
+                "source": "anonymous",
+                "error": str(exc),
+                "stale": False,
+            },
+        )
+        return False, False
+
+
+def _atomic_text(path: str, text: str, mode: int | None = None) -> None:
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            if not text.endswith("\n"):
+                fh.write("\n")
+        os.replace(tmp, path)
+        if mode is not None:
+            os.chmod(path, mode)
+        tmp = None
+    finally:
+        if tmp and os.path.isfile(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _install_ca_script(kind: str, pem_url: str, fallback_url: str, basename: str) -> str:
+    if kind == "debian":
+        dest = f"/usr/local/share/ca-certificates/{basename}.crt"
+        refresh = "update-ca-certificates"
+    else:
+        dest = f"/etc/pki/ca-trust/source/anchors/{basename}.crt"
+        refresh = "update-ca-trust extract"
+    # Concatenate: avoid Ansible Jinja on shell ${VAR:-default} in this .j2.
+    return (
+        "#!/bin/bash\n"
+        "set -euo pipefail\n"
+        "# Install lab root CA into the OS trust store. curl -k: TLS is not trusted yet.\n"
+        'if [ "$(id -u)" -ne 0 ]; then\n'
+        '  echo "run as root" >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        'URL="${CA_PEM_URL:-' + pem_url + '}"\n'
+        'FALLBACK="${CA_PEM_FALLBACK:-' + fallback_url + '}"\n'
+        'DEST="' + dest + '"\n'
+        'tmp="$(mktemp)"\n'
+        """trap 'rm -f "$tmp"' EXIT\n"""
+        'if ! curl -fsSLk -o "$tmp" "$URL"; then\n'
+        '  curl -fsSLk -o "$tmp" "$FALLBACK"\n'
+        "fi\n"
+        'cp "$tmp" "$DEST"\n'
+        'chmod 0644 "$DEST"\n'
+        + refresh
+        + "\n"
+        'echo "installed $DEST"\n'
+    )
+
+
+def publish_ca_files(ctx: dict, html_dir: str) -> dict:
+    ca_dir = os.path.join(html_dir, "ca")
+    os.makedirs(ca_dir, exist_ok=True)
+    root_src = ctx.get("ca_root_path") or "/opt/stepca/certs/root_ca.crt"
+    pem_path = os.path.join(ca_dir, "roots.pem")
+    pem_ok = False
+    pem_error = None
+    try:
+        if os.path.isfile(root_src):
+            shutil.copyfile(root_src, pem_path)
+            pem_ok = True
+        else:
+            pem_error = f"missing {root_src}"
+    except OSError as exc:
+        pem_error = str(exc)
+
+    hostname = ctx.get("hostname") or "stats.lab"
+    pem_page = f"https://{hostname}/ca/roots.pem"
+    fallback = ctx.get("ca_step_url") or pem_page
+    ca_host = ctx.get("pki_ca_host") or "ca"
+    basename = str(ca_host).replace(".", "-")
+    _atomic_text(
+        os.path.join(ca_dir, "install-root-ca-debian.sh"),
+        _install_ca_script("debian", pem_page, fallback, basename),
+        mode=0o755,
+    )
+    _atomic_text(
+        os.path.join(ca_dir, "install-root-ca-rhel.sh"),
+        _install_ca_script("rhel", pem_page, fallback, basename),
+        mode=0o755,
+    )
+    extra = ctx.get("ca_upstream_urls") or []
+    if not isinstance(extra, list):
+        extra = [extra] if extra else []
+    return {
+        "pem_ok": pem_ok,
+        "pem_error": pem_error,
+        "pem_path": "/ca/roots.pem",
+        "debian_sh": "/ca/install-root-ca-debian.sh",
+        "rhel_sh": "/ca/install-root-ca-rhel.sh",
+        "step_url": fallback,
+        "upstream_urls": extra,
+        "ca_host": ca_host,
+    }
+
+
+def annotate_on_disk(certs_path: str, issued_path: str) -> None:
+    with open(certs_path, encoding="utf-8") as fh:
+        certs = json.load(fh)
+    with open(issued_path, encoding="utf-8") as fh:
+        issued = json.load(fh)
+    known = {
+        c.get("serial") for c in certs if c.get("present") and c.get("serial")
+    }
+    for row in issued:
+        row["on_disk"] = row.get("serial", "") in known
+    _atomic_json(issued_path, issued)
+
+
+def soft_scrape(gate_on: bool, out: str, scrape_fn) -> tuple[bool, bool]:
+    """Return (ok, stale). Gate-off → clear [], ok True."""
+    if not gate_on:
+        _atomic_json(out, [])
+        return True, False
+    try:
+        scrape_fn()
+        return True, False
+    except Exception as exc:
+        print(f"scrape soft-fail {out}: {exc}", file=sys.stderr)
+        if os.path.isfile(out) and _nonempty_list(out):
+            return False, True
+        _atomic_json(out, [])
+        return False, False
+
+
+def ansible_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    s = str(value).strip().lower()
+    if s in ("true", "yes", "y", "on", "1"):
+        return True
+    if s in ("false", "no", "n", "off", "0", ""):
+        return False
+    return bool(value)
+
+
+def render(ctx: dict, flags: dict, scrape: dict, generated_by: str) -> None:
+    html_dir = os.environ["INFRA_STATS_HTML_DIR"]
+    tmpl_path = Path(os.environ["INFRA_STATS_HTML_TEMPLATE"])
+    os.makedirs(html_dir, exist_ok=True)
+
+    env = Environment(
+        loader=FileSystemLoader(str(tmpl_path.parent)),
+        autoescape=False,
+    )
+    env.filters["bool"] = ansible_bool
+
+    bind_zones = scrape["bind_zones"]
+    ntp = scrape["ntp"]
+    certs = scrape["certs"]
+    issued = scrape["issued_certs"]
+    cache = scrape.get("cache") or []
+    html_limit = int(ctx.get("cache_html_limit") or 200)
+    if html_limit < 1:
+        html_limit = 200
+    cache_html = []
+    for tree in cache:
+        row = dict(tree)
+        objs = list(tree.get("objects") or [])
+        row["html_objects"] = objs[:html_limit]
+        row["html_truncated"] = int(tree.get("object_count") or len(objs)) > html_limit
+        cache_html.append(row)
+
+    html_vars = {
+        "dns_domain_suffix": ctx.get("dns_domain_suffix") or "lab",
+        "infra_stats_path": ctx.get("path") or "/stats",
+        "infra_stats_hostname": ctx.get("hostname") or "",
+        "generated_by": generated_by,
+        "infra_stats_nginx_locations": ctx.get("nginx_locations") or [],
+        "infra_stats_pkg_repos": ctx.get("pkg_repos") or [],
+        "infra_stats_helm_repos": ctx.get("helm_repos") or [],
+        "infra_stats_docker_repos": ctx.get("docker_repos") or [],
+        "infra_stats_bind_zones": bind_zones,
+        "infra_stats_bind_inventory_fallback": ctx.get("bind_inventory_fallback")
+        or [],
+        "infra_stats_bind_scrape_ok": flags["bind_scrape_ok"],
+        "infra_stats_bind_scrape_stale": flags["bind_scrape_stale"],
+        "bind_zones_dir": ctx.get("bind_zones_dir") or "/opt/bind/zones",
+        "setup_ntp": ctx.get("setup_ntp", False),
+        "ntp_container_name": ctx.get("ntp_container_name") or "ntp",
+        "ntp_listen_ip": ctx.get("ntp_listen_ip") or "",
+        "infra_stats_ntp": ntp,
+        "infra_stats_ntp_scrape_ok": flags["ntp_scrape_ok"],
+        "infra_stats_ntp_scrape_stale": flags["ntp_scrape_stale"],
+        "infra_stats_certs": certs,
+        "infra_stats_known_scrape_ok": flags["known_scrape_ok"],
+        "infra_stats_known_scrape_stale": flags["known_scrape_stale"],
+        "infra_stats_issued_certs": issued,
+        "infra_stats_issued_scrape_ok": flags["issued_scrape_ok"],
+        "infra_stats_issued_scrape_stale": flags["issued_scrape_stale"],
+        "infra_stats_issued_annotate_ok": flags["issued_annotate_ok"],
+        "stepca_data_dir": ctx.get("stepca_data_dir") or "/opt/stepca",
+        "infra_stats_cache": cache_html,
+        "infra_stats_cache_scrape_ok": flags["cache_scrape_ok"],
+        "infra_stats_cache_scrape_stale": flags["cache_scrape_stale"],
+        "infra_stats_cache_html_limit": html_limit,
+        "infra_stats_docker_hub": scrape.get("docker_hub") or {},
+        "infra_stats_ca": scrape.get("ca") or {},
+    }
+
+    html = env.get_template(tmpl_path.name).render(**html_vars)
+    html_out = os.path.join(html_dir, "stats.html")
+    html_tmp = html_out + ".tmp"
+    try:
+        with open(html_tmp, "w", encoding="utf-8") as fh:
+            fh.write(html)
+            if not html.endswith("\n"):
+                fh.write("\n")
+        os.replace(html_tmp, html_out)
+        html_tmp = None
+    finally:
+        if html_tmp and os.path.isfile(html_tmp):
+            try:
+                os.unlink(html_tmp)
+            except OSError:
+                pass
+
+    payload = {
+        "generated_by": generated_by,
+        "hostname": ctx.get("hostname") or "",
+        "path": ctx.get("path") or "/stats",
+        "dns_domain_suffix": ctx.get("dns_domain_suffix") or "",
+        "note": (
+            "known on-disk leaves for enabled TLS stacks; issued_certs from "
+            "step-ca badger DER scan (on_disk marks overlap with known); ntp "
+            "from compose chronyc; scrape_stale means non-empty previous "
+            "snapshot kept; annotate fail sets issued_scrape_ok false without stale; "
+            "cache is on-disk inventory (nginx KEY URIs are not an apt catalog); "
+            "docker_hub is anonymous Hub pull quota for this host WAN IP"
+        ),
+        "bind_scrape_ok": flags["bind_scrape_ok"],
+        "ntp_scrape_ok": flags["ntp_scrape_ok"],
+        "known_scrape_ok": flags["known_scrape_ok"],
+        "issued_scrape_ok": flags["issued_scrape_ok"],
+        "issued_annotate_ok": flags["issued_annotate_ok"],
+        "bind_scrape_stale": flags["bind_scrape_stale"],
+        "ntp_scrape_stale": flags["ntp_scrape_stale"],
+        "known_scrape_stale": flags["known_scrape_stale"],
+        "issued_scrape_stale": flags["issued_scrape_stale"],
+        "cache_scrape_ok": flags["cache_scrape_ok"],
+        "cache_scrape_stale": flags["cache_scrape_stale"],
+        "docker_hub": scrape.get("docker_hub") or {},
+        "ca": scrape.get("ca") or {},
+        "nginx_locations": ctx.get("nginx_locations") or [],
+        "pkg_repos": ctx.get("pkg_repos") or [],
+        "helm_repos": ctx.get("helm_repos") or [],
+        "docker_repos": ctx.get("docker_repos") or [],
+        "bind_zones": bind_zones,
+        "bind_inventory_fallback": ctx.get("bind_inventory_fallback") or [],
+        "ntp": ntp,
+        "certs": certs,
+        "issued_certs": issued,
+        "cache": cache,
+    }
+    _atomic_json(os.path.join(html_dir, "stats.json"), payload)
+
+
+def main() -> int:
+    ctx_path = os.environ.get("INFRA_STATS_CONTEXT", "")
+    scrape_dir = os.environ.get("INFRA_STATS_SCRAPE_DIR", "")
+    if not ctx_path or not scrape_dir:
+        print("INFRA_STATS_CONTEXT and INFRA_STATS_SCRAPE_DIR required", file=sys.stderr)
+        return 2
+    if not os.path.isfile(ctx_path):
+        print(f"missing context: {ctx_path}", file=sys.stderr)
+        return 2
+
+    with open(ctx_path, encoding="utf-8") as fh:
+        ctx = json.load(fh)
+
+    os.makedirs(scrape_dir, exist_ok=True)
+    _cleanup_tmp(scrape_dir)
+
+    bind_out = os.path.join(scrape_dir, "bind_zones.json")
+    ntp_out = os.path.join(scrape_dir, "ntp.json")
+    certs_out = os.path.join(scrape_dir, "certs.json")
+    issued_out = os.path.join(scrape_dir, "issued_certs.json")
+    cache_out = os.path.join(scrape_dir, "cache.json")
+    hub_out = os.path.join(scrape_dir, "docker_hub.json")
+
+    setup_bind = bool(ctx.get("setup_bind"))
+    setup_ntp = bool(ctx.get("setup_ntp"))
+    setup_stepca = bool(ctx.get("setup_stepca"))
+
+    bind_ok, bind_stale = soft_scrape(
+        setup_bind,
+        bind_out,
+        lambda: scrape_bind(ctx.get("bind_zones_dir") or "/opt/bind/zones", bind_out),
+    )
+    ntp_ok, ntp_stale = soft_scrape(
+        setup_ntp,
+        ntp_out,
+        lambda: scrape_ntp(ctx, ntp_out),
+    )
+    known_ok, known_stale = soft_scrape(
+        True,
+        certs_out,
+        lambda: scrape_known_certs(ctx.get("cert_paths") or [], certs_out),
+    )
+    issued_ok, issued_stale = soft_scrape(
+        setup_stepca,
+        issued_out,
+        lambda: scrape_issued(
+            ctx.get("stepca_db_dir")
+            or ((ctx.get("stepca_data_dir") or "/opt/stepca") + "/db"),
+            issued_out,
+        ),
+    )
+    cache_ok, cache_stale = soft_scrape(
+        True,
+        cache_out,
+        lambda: scrape_cache(ctx, cache_out),
+    )
+    hub_ok, hub_stale = soft_scrape_obj(
+        hub_out,
+        lambda: scrape_docker_hub(hub_out),
+    )
+
+    annotate_ok = True
+    if setup_stepca and issued_ok:
+        try:
+            annotate_on_disk(certs_out, issued_out)
+        except Exception as exc:
+            print(f"annotate soft-fail: {exc}", file=sys.stderr)
+            annotate_ok = False
+            issued_ok = False
+
+    flags = {
+        "bind_scrape_ok": bind_ok,
+        "bind_scrape_stale": bind_stale,
+        "ntp_scrape_ok": ntp_ok,
+        "ntp_scrape_stale": ntp_stale,
+        "known_scrape_ok": known_ok,
+        "known_scrape_stale": known_stale,
+        "issued_scrape_ok": issued_ok,
+        "issued_scrape_stale": issued_stale,
+        "issued_annotate_ok": annotate_ok,
+        "cache_scrape_ok": cache_ok,
+        "cache_scrape_stale": cache_stale,
+        "docker_hub_scrape_ok": hub_ok,
+        "docker_hub_scrape_stale": hub_stale,
+    }
+    html_dir = os.environ.get("INFRA_STATS_HTML_DIR") or ""
+    ca_info = publish_ca_files(ctx, html_dir) if html_dir else {}
+    scrape = {
+        "bind_zones": _load_list(bind_out) or [],
+        "ntp": _load_list(ntp_out) or [],
+        "certs": _load_list(certs_out) or [],
+        "issued_certs": _load_list(issued_out) or [],
+        "cache": _load_list(cache_out) or [],
+        "docker_hub": _load_obj(hub_out) or {},
+        "ca": ca_info,
+    }
+
+    generated_by = os.environ.get("INFRA_STATS_GENERATED_BY") or "cron-refresh"
+    render(ctx, flags, scrape, generated_by)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

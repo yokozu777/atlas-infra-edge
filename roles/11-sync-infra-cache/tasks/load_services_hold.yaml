@@ -1,0 +1,71 @@
+---
+# Restore stopped_* restart intent from a previous incomplete sync (rsync fail after stop).
+
+- name: Stat infra cache sync services hold
+  ansible.builtin.stat:
+    path: "{{ nginx_cache_sync_services_hold_path }}"
+  register: nginx_cache_sync_services_hold_stat
+
+- name: Load infra cache sync services hold
+  when: nginx_cache_sync_services_hold_stat.stat.exists | default(false)
+  block:
+    - name: Read infra cache sync services hold
+      ansible.builtin.slurp:
+        path: "{{ nginx_cache_sync_services_hold_path }}"
+      register: nginx_cache_sync_services_hold_slurp
+
+    - name: Decode infra cache sync services hold
+      ansible.builtin.set_fact:
+        nginx_cache_sync_services_hold_data: "{{ nginx_cache_sync_services_hold_slurp.content | b64decode | from_yaml }}"
+
+    - name: Require hold mapping
+      ansible.builtin.assert:
+        that:
+          - nginx_cache_sync_services_hold_data is mapping
+        fail_msg: infra cache sync services hold is not a mapping
+  rescue:
+    - name: Ignore unreadable infra cache sync services hold
+      ansible.builtin.set_fact:
+        nginx_cache_sync_services_hold_data: {}
+
+- name: Apply infra cache sync services hold to restart intent
+  when:
+    - nginx_cache_sync_services_hold_stat.stat.exists | default(false)
+    - nginx_cache_sync_services_hold_data is defined
+    - nginx_cache_sync_services_hold_data is mapping
+  block:
+    - name: Restore registry restart intent from services hold
+      ansible.builtin.set_fact:
+        nginx_cache_sync_stopped_registry: true
+      when: nginx_cache_sync_services_hold_data.registry | default(false) | bool
+
+    - name: Restore registry-nginx restart intent from services hold
+      ansible.builtin.set_fact:
+        nginx_cache_sync_stopped_registry_nginx: true
+      when: nginx_cache_sync_services_hold_data.registry_nginx | default(false) | bool
+
+    - name: Restore pkg-repo nginx restart intent from services hold
+      ansible.builtin.set_fact:
+        nginx_cache_sync_stopped_pkg_repo_nginx: true
+      when: nginx_cache_sync_services_hold_data.pkg_repo_nginx | default(false) | bool
+
+    - name: Restore helm-repo nginx restart intent from services hold
+      ansible.builtin.set_fact:
+        nginx_cache_sync_stopped_helm_repo_nginx: true
+      when: nginx_cache_sync_services_hold_data.helm_repo_nginx | default(false) | bool
+
+    - name: Restore custom nginx restart intent from services hold
+      ansible.builtin.set_fact:
+        nginx_cache_sync_stopped_custom_nginx: true
+      when: nginx_cache_sync_services_hold_data.custom_nginx | default(false) | bool
+
+    - name: Log infra cache sync services hold restore
+      ansible.builtin.debug:
+        msg: >-
+          atlas_infra_cache_sync services_hold_restored
+          path={{ nginx_cache_sync_services_hold_path }}
+          registry={{ nginx_cache_sync_stopped_registry | default(false) }}
+          registry_nginx={{ nginx_cache_sync_stopped_registry_nginx | default(false) }}
+          pkg_repo_nginx={{ nginx_cache_sync_stopped_pkg_repo_nginx | default(false) }}
+          helm_repo_nginx={{ nginx_cache_sync_stopped_helm_repo_nginx | default(false) }}
+          custom_nginx={{ nginx_cache_sync_stopped_custom_nginx | default(false) }}

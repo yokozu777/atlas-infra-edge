@@ -1,0 +1,18 @@
+---
+# Phase 2/6 orchestrator: unique image pull with skip-if-present (parallel by default).
+
+- name: Begin compose_pull timing
+  ansible.builtin.import_tasks: compose_timing_begin.yaml
+  vars:
+    compose_timing_phase: compose_pull
+
+- name: Build compose stack images for phase pull
+  ansible.builtin.import_tasks: build_compose_pre_pull_images.yaml
+
+- name: Pre-pull compose stack images (skip-if-present, parallel by default)
+  ansible.builtin.import_tasks: pre_pull_compose_images.yaml
+
+- name: End compose_pull timing
+  ansible.builtin.import_tasks: compose_timing_end.yaml
+  vars:
+    compose_timing_phase: compose_pull

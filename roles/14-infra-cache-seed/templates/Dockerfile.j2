@@ -1,0 +1,35 @@
+{% if not (infra_cache_seed_publish_use_staging | default(false) | bool) %}
+# syntax=docker/dockerfile:1.7
+{% endif %}
+# Infra cache seed: host bind-mount trees under /seed. TLS certs are never copied.
+FROM {{ infra_cache_seed_builder_image }}
+{% if infra_cache_seed_publish_use_staging | default(false) | bool %}
+{% if infra_cache_seed_include.registry | default(false) | bool %}
+COPY registry /seed/registry
+{% endif %}
+{% if infra_cache_seed_include.helm_repo | default(false) | bool %}
+COPY helm-repo /seed/helm-repo
+COPY helm-releases /seed/helm-releases
+{% endif %}
+{% if infra_cache_seed_include.pkg_repo | default(false) | bool %}
+COPY pkg-repo /seed/pkg-repo
+{% endif %}
+{% if infra_cache_seed_include.custom_www | default(false) | bool %}
+COPY custom-www /seed/custom-www
+{% endif %}
+{% else %}
+{% if infra_cache_seed_include.registry | default(false) | bool %}
+COPY --from=registry --exclude=certs / /seed/registry
+{% endif %}
+{% if infra_cache_seed_include.helm_repo | default(false) | bool %}
+COPY --from=helm_repo / /seed/helm-repo
+COPY --from=helm_releases / /seed/helm-releases
+{% endif %}
+{% if infra_cache_seed_include.pkg_repo | default(false) | bool %}
+COPY --from=pkg_repo / /seed/pkg-repo
+{% endif %}
+{% if infra_cache_seed_include.custom_www | default(false) | bool %}
+COPY --from=custom_www / /seed/custom-www
+{% endif %}
+{% endif %}
+COPY MANIFEST /seed/MANIFEST

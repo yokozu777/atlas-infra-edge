@@ -1,0 +1,139 @@
+---
+# After rsync --numeric-ids, map pulled nginx cache trees to the runtime nginx uid/gid.
+#
+# Resolve modes (nginx_cache_sync_ownership_resolve):
+#   static    — defaults nginx_cache_sync_nginx_uid/gid (fast; official nginx alpine = 101)
+#   container — docker exec id from a running registry-nginx container
+#   image     — legacy ownership-image probe (slow; escape hatch only)
+
+- name: Build pulled nginx cache directories for ownership fix
+  ansible.builtin.set_fact:
+    nginx_cache_sync_pulled_cache_dirs: >-
+      {{
+        []
+        + ([pkg_repo_nginx_cache_dir] if (nginx_cache_sync_pkg_repo_enabled | bool) else [])
+        + ([helm_repo_nginx_cache_dir] if (nginx_cache_sync_helm_repo_enabled | bool) else [])
+        + ([helm_repo_nginx_releases_dir] if (nginx_cache_sync_helm_repo_enabled | bool) else [])
+        + ([custom_nginx_www_dir] if (nginx_cache_sync_custom_www_enabled | bool) else [])
+      }}
+
+- name: Assert cache ownership resolve mode is valid
+  ansible.builtin.assert:
+    that:
+      - nginx_cache_sync_ownership_resolve | default('static') in ['static', 'container', 'image']
+    fail_msg: >-
+      nginx_cache_sync_ownership_resolve must be static, container, or image
+      (got {{ nginx_cache_sync_ownership_resolve | default('') | quote }}).
+  when: (nginx_cache_sync_pulled_cache_dirs | default([]) | length) > 0
+
+- name: Resolve nginx ownership ids from static defaults
+  ansible.builtin.set_fact:
+    nginx_cache_sync_owner_uid: "{{ nginx_cache_sync_nginx_uid | int }}"
+    nginx_cache_sync_owner_gid: "{{ nginx_cache_sync_nginx_gid | int }}"
+  when:
+    - (nginx_cache_sync_pulled_cache_dirs | default([]) | length) > 0
+    - (nginx_cache_sync_ownership_resolve | default('static')) == 'static'
+
+- name: Probe registry-nginx container for ownership resolve
+  ansible.builtin.command:
+    cmd: docker inspect -f '{{ "{{" }}.State.Running{{ "}}" }}' {{ registry_nginx_container_name }}
+  register: nginx_cache_sync_ownership_container_running
+  changed_when: false
+  failed_when: false
+  when:
+    - (nginx_cache_sync_pulled_cache_dirs | default([]) | length) > 0
+    - (nginx_cache_sync_ownership_resolve | default('static')) == 'container'
+
+- name: Require running registry-nginx for container ownership resolve
+  ansible.builtin.assert:
+    that:
+      - nginx_cache_sync_ownership_container_running.rc | default(1) == 0
+      - nginx_cache_sync_ownership_container_running.stdout | default('') | trim == 'true'
+    fail_msg: >-
+      nginx_cache_sync_ownership_resolve=container requires a running
+      {{ registry_nginx_container_name }} container (or use resolve=static with
+      nginx_cache_sync_nginx_uid/gid overrides).
+  when:
+    - (nginx_cache_sync_pulled_cache_dirs | default([]) | length) > 0
+    - (nginx_cache_sync_ownership_resolve | default('static')) == 'container'
+
+- name: Resolve nginx uid from running registry-nginx container
+  ansible.builtin.command:
+    cmd: docker exec {{ registry_nginx_container_name }} id -u nginx
+  register: nginx_cache_sync_nginx_uid_cmd
+  changed_when: false
+  when:
+    - (nginx_cache_sync_pulled_cache_dirs | default([]) | length) > 0
+    - (nginx_cache_sync_ownership_resolve | default('static')) == 'container'
+
+- name: Resolve nginx gid from running registry-nginx container
+  ansible.builtin.command:
+    cmd: docker exec {{ registry_nginx_container_name }} id -g nginx
+  register: nginx_cache_sync_nginx_gid_cmd
+  changed_when: false
+  when:
+    - (nginx_cache_sync_pulled_cache_dirs | default([]) | length) > 0
+    - (nginx_cache_sync_ownership_resolve | default('static')) == 'container'
+
+- name: Set ownership ids from container probe
+  ansible.builtin.set_fact:
+    nginx_cache_sync_owner_uid: "{{ nginx_cache_sync_nginx_uid_cmd.stdout | trim | int }}"
+    nginx_cache_sync_owner_gid: "{{ nginx_cache_sync_nginx_gid_cmd.stdout | trim | int }}"
+  when:
+    - (nginx_cache_sync_pulled_cache_dirs | default([]) | length) > 0
+    - (nginx_cache_sync_ownership_resolve | default('static')) == 'container'
+
+- name: Resolve nginx uid via ownership image (legacy escape hatch)
+  ansible.builtin.command:
+    cmd: >-
+      docker run --rm --entrypoint ''
+      {{ nginx_cache_sync_ownership_image }}
+      id -u nginx
+  register: nginx_cache_sync_nginx_uid_cmd
+  changed_when: false
+  when:
+    - (nginx_cache_sync_pulled_cache_dirs | default([]) | length) > 0
+    - (nginx_cache_sync_ownership_resolve | default('static')) == 'image'
+
+- name: Resolve nginx gid via ownership image (legacy escape hatch)
+  ansible.builtin.command:
+    cmd: >-
+      docker run --rm --entrypoint ''
+      {{ nginx_cache_sync_ownership_image }}
+      id -g nginx
+  register: nginx_cache_sync_nginx_gid_cmd
+  changed_when: false
+  when:
+    - (nginx_cache_sync_pulled_cache_dirs | default([]) | length) > 0
+    - (nginx_cache_sync_ownership_resolve | default('static')) == 'image'
+
+- name: Set ownership ids from ownership image probe
+  ansible.builtin.set_fact:
+    nginx_cache_sync_owner_uid: "{{ nginx_cache_sync_nginx_uid_cmd.stdout | trim | int }}"
+    nginx_cache_sync_owner_gid: "{{ nginx_cache_sync_nginx_gid_cmd.stdout | trim | int }}"
+  when:
+    - (nginx_cache_sync_pulled_cache_dirs | default([]) | length) > 0
+    - (nginx_cache_sync_ownership_resolve | default('static')) == 'image'
+
+- name: Assert resolved nginx ownership ids look numeric
+  ansible.builtin.assert:
+    that:
+      - nginx_cache_sync_owner_uid is defined
+      - nginx_cache_sync_owner_gid is defined
+      - nginx_cache_sync_owner_uid | string | regex_search('^[0-9]+$') is not none
+      - nginx_cache_sync_owner_gid | string | regex_search('^[0-9]+$') is not none
+    fail_msg: >-
+      Failed to resolve nginx ownership ids
+      (uid={{ nginx_cache_sync_owner_uid | default('unset') }},
+      gid={{ nginx_cache_sync_owner_gid | default('unset') }},
+      resolve={{ nginx_cache_sync_ownership_resolve | default('static') }}).
+  when: (nginx_cache_sync_pulled_cache_dirs | default([]) | length) > 0
+
+- name: Fix nginx cache and static content ownership after rsync pull
+  ansible.builtin.file:
+    path: "{{ item }}"
+    owner: "{{ nginx_cache_sync_owner_uid }}"
+    group: "{{ nginx_cache_sync_owner_gid }}"
+    recurse: true
+  loop: "{{ nginx_cache_sync_pulled_cache_dirs | default([]) }}"
+  when: (nginx_cache_sync_pulled_cache_dirs | default([]) | length) > 0

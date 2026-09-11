@@ -1,0 +1,66 @@
+---
+# Issue/refresh registry TLS via step-ca. Requires provisioned CA.
+# Called from render when CA already exists, and from pre_start on cold path
+# (compose_render runs before compose_start_core ACME init).
+
+- name: Require provisioned step-ca for registry TLS
+  ansible.builtin.assert:
+    that:
+      - stepca_provisioned_for_registry_tls is defined
+      - stepca_provisioned_for_registry_tls.stat.exists | default(false)
+    fail_msg: >-
+      step-ca is not provisioned yet (missing {{ stepca_provisioned_marker }}).
+      Cold path: compose_start_core must finish before compose_start_registry.
+      Ad-hoc: run step-ca bootstrap first.
+  when: registry_tls_enabled | default(false) | bool
+
+- name: Check registry TLS certificate file
+  ansible.builtin.stat:
+    path: "{{ registry_tls_dir }}/{{ registry_tls_cert_filename }}"
+  register: registry_tls_cert_stat
+  when: registry_tls_enabled | default(false) | bool
+
+- name: Check registry TLS wildcard SAN for nginx ingress
+  ansible.builtin.command:
+    cmd: >-
+      openssl x509 -in {{ registry_tls_dir }}/{{ registry_tls_cert_filename }}
+      -noout -ext subjectAltName
+  register: registry_tls_cert_sans
+  changed_when: false
+  when:
+    - registry_tls_enabled | default(false) | bool
+    - setup_registry_nginx | default(false) | bool
+    - registry_tls_cert_stat.stat.exists | default(false)
+
+- name: Remove registry TLS certificate when nginx SAN coverage is outdated
+  ansible.builtin.file:
+    path: "{{ registry_tls_dir }}/{{ registry_tls_cert_filename }}"
+    state: absent
+  register: registry_tls_cert_removed
+  when:
+    - registry_tls_enabled | default(false) | bool
+    - setup_registry_nginx | default(false) | bool
+    - registry_tls_cert_stat.stat.exists | default(false)
+    - ('*.{{ registry_ingress_domain }}') not in registry_tls_cert_sans.stdout
+
+- name: Issue initial registry TLS certificate when missing
+  ansible.builtin.command:
+    cmd: "{{ registry_compose_project_dir }}/issue-registry-tls-cert.sh"
+  register: registry_tls_cert_issued
+  when:
+    - registry_tls_enabled | default(false) | bool
+    - not registry_tls_cert_stat.stat.exists | default(false)
+      or (registry_tls_cert_removed is defined and registry_tls_cert_removed.changed | default(false))
+  no_log: true
+  changed_when: registry_tls_cert_issued.rc == 0
+
+- name: Set registry TLS file permissions
+  ansible.builtin.file:
+    path: "{{ registry_tls_dir }}/{{ item.path }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ registry_tls_cert_filename }}"
+      mode: "0644"
+    - path: "{{ registry_tls_key_filename }}"
+      mode: "0600"
+  when: registry_tls_enabled | default(false) | bool

@@ -1,0 +1,37 @@
+---
+# Phase 2/6 orchestrator: deploy unit files, then render all enabled stacks (files only).
+# Does not pull images, start units, run bootstrap, warm, or shared nginx reload.
+#
+# Order: units first (resets pending), then render (may mark_pending).
+# Reconcile / start phases consume pending afterward.
+
+- name: Begin compose_render timing
+  ansible.builtin.import_tasks: compose_timing_begin.yaml
+  vars:
+    compose_timing_phase: compose_render
+
+- name: Deploy compose systemd unit files before render
+  ansible.builtin.import_tasks: deploy_units.yaml
+  when: setup_compose_systemd | default(false) | bool
+
+- name: Resolve and topo-sort compose stacks for render from infra_compose_stacks
+  ansible.builtin.set_fact:
+    compose_stacks_render: >-
+      {{
+        infra_compose_stacks
+        | compose_stacks_for_render(vars)
+        | compose_topo_sort
+      }}
+
+- name: Render enabled compose stack files
+  ansible.builtin.include_role:
+    name: "{{ item.role }}"
+    tasks_from: "{{ item.render_from | default('render.yaml') }}"
+  loop: "{{ compose_stacks_render | default([]) }}"
+  loop_control:
+    label: "{{ item.id }}"
+
+- name: End compose_render timing
+  ansible.builtin.import_tasks: compose_timing_end.yaml
+  vars:
+    compose_timing_phase: compose_render

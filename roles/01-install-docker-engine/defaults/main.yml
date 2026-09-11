@@ -1,0 +1,13 @@
+---
+docker_apt_key_path: /etc/apt/keyrings/docker.asc
+docker_apt_ubuntu_key_url: https://download.docker.com/linux/ubuntu/gpg
+docker_apt_debian_key_url: https://download.docker.com/linux/debian/gpg
+infra_bootstrap_public_pkg_repos: false
+
+docker_packages:
+  - docker-ce
+  - docker-compose-plugin
+  - docker-buildx-plugin
+
+docker_group_name: docker
+docker_group_user: localuser

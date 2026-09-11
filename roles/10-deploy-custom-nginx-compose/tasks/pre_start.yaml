@@ -1,0 +1,30 @@
+---
+# compose_start_registry pre_start: issue TLS after step-ca is up (cold path).
+
+- name: Check step-ca provision state for custom nginx TLS
+  ansible.builtin.stat:
+    path: "{{ stepca_provisioned_marker }}"
+  register: stepca_provisioned_for_custom_nginx_tls
+  when: custom_nginx_tls_enabled | default(false) | bool
+
+- name: Issue custom nginx TLS certificates
+  ansible.builtin.import_tasks: issue_tls.yaml
+  when: custom_nginx_tls_enabled | default(false) | bool
+
+- name: Mark custom nginx pending restart after deferred TLS issue
+  ansible.builtin.include_role:
+    name: 06-enable-compose-systemd
+    tasks_from: mark_compose_pending_restart.yaml
+  vars:
+    compose_pending_restart_units: >-
+      {{
+        [compose_systemd_custom_nginx_unit_name]
+        if not (
+          (custom_nginx_shared_with_registry | default(true) | bool)
+          and (setup_registry_nginx | default(false) | bool)
+        )
+        else [compose_systemd_registry_nginx_unit_name]
+      }}
+  when:
+    - custom_nginx_tls_enabled | default(false) | bool
+    - custom_nginx_tls_cert_issued.changed | default(false)

@@ -1,0 +1,234 @@
+---
+# Phase 1 render: stubs/nginx.conf/compose + mark_pending.
+# Runtime recreate/reload/network ensure stay in main cold-path.
+
+- name: Build registry proxy upstreams from containerd_registry_mirrors
+  ansible.builtin.set_fact:
+    registry_proxy_upstreams: >-
+      {{
+        registry_proxy_upstreams | default([])
+        + [mirror | combine({
+          'proxy_port': registry_proxy_port_base | int + (registry_proxy_upstreams | default([]) | length),
+          'data_subdir': mirror.dir_name | regex_replace('[^a-zA-Z0-9._-]', '_'),
+          'service_name': 'proxy-' ~ (mirror.dir_name | regex_replace('[^a-zA-Z0-9._-]', '-')),
+          'proxy_slug': mirror.dir_name | regex_replace('[^a-zA-Z0-9._-]', '-') | replace('.', '-'),
+          'proxy_hostname': mirror.dir_name | registry_mirror_host(registry_ingress_domain),
+          'upstream_host': mirror.server | regex_replace('^https://', '') | regex_replace('/.*$', '')
+        })]
+      }}
+  loop: "{{ containerd_registry_mirrors }}"
+  loop_control:
+    loop_var: mirror
+  when:
+    - mirror.direct is not defined
+    - mirror.server is match('^https://[^/]*\\.[^/]+/?$')
+    - mirror.server not in (registry_proxy_upstreams | default([]) | map(attribute='server') | list)
+
+- name: Require registry pull-through stack for nginx ingress
+  ansible.builtin.assert:
+    that:
+      - setup_registry | default(false) | bool
+      - registry_proxy_upstreams | default([]) | length > 0
+    fail_msg: >-
+      setup_registry_nginx requires setup_registry=true and non-empty registry_proxy_upstreams
+      (check containerd_registry_mirrors in group_vars; deploy role 05 for registry-compose backends).
+
+- name: Require registry TLS for nginx HTTPS ingress
+  ansible.builtin.assert:
+    that:
+      - registry_tls_enabled | default(false) | bool
+    fail_msg: setup_registry_nginx requires registry_tls_enabled=true.
+
+- name: Ensure registry nginx config directory exists
+  ansible.builtin.file:
+    path: "{{ registry_nginx_config_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Ensure registry nginx compose project directory exists
+  ansible.builtin.file:
+    path: "{{ registry_nginx_compose_project_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Ensure pkg-repo vhost directory exists for registry nginx include
+  ansible.builtin.file:
+    path: "{{ pkg_repo_nginx_vhosts_dir }}"
+    state: directory
+    mode: "0755"
+  when:
+    - setup_apt_rpm_nginx | default(false) | bool
+    - pkg_repo_nginx_shared_with_registry | default(true) | bool
+
+- name: Ensure pkg-repo nginx cache directories exist for registry nginx
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ pkg_repo_nginx_cache_dir }}"
+    - "{{ pkg_repo_nginx_cache_dir }}/metadata"
+    - "{{ pkg_repo_nginx_cache_dir }}/blobs"
+  when:
+    - setup_apt_rpm_nginx | default(false) | bool
+    - pkg_repo_nginx_shared_with_registry | default(true) | bool
+
+- name: Check pkg-repo vhost configuration presence
+  ansible.builtin.stat:
+    path: "{{ pkg_repo_nginx_vhosts_dir }}/pkg-repo-vhosts.conf"
+  register: pkg_repo_vhosts_conf_stat
+  when:
+    - setup_apt_rpm_nginx | default(false) | bool
+    - pkg_repo_nginx_shared_with_registry | default(true) | bool
+
+- name: Deploy pkg-repo vhost stub until role 08 renders real config
+  ansible.builtin.template:
+    src: pkg-repo-vhosts.stub.j2
+    dest: "{{ pkg_repo_nginx_vhosts_dir }}/pkg-repo-vhosts.conf"
+    mode: "0644"
+  when:
+    - setup_apt_rpm_nginx | default(false) | bool
+    - pkg_repo_nginx_shared_with_registry | default(true) | bool
+    - not pkg_repo_vhosts_conf_stat.stat.exists | default(false)
+
+- name: Ensure helm-repo vhost directory exists for registry nginx include
+  ansible.builtin.file:
+    path: "{{ helm_repo_nginx_vhosts_dir }}"
+    state: directory
+    mode: "0755"
+  when:
+    - setup_helm_nginx | default(false) | bool
+    - helm_repo_nginx_shared_with_registry | default(true) | bool
+
+- name: Ensure helm-repo cache and GitHub releases store exist for registry nginx
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ helm_repo_nginx_cache_dir }}"
+    - "{{ helm_repo_nginx_releases_dir }}"
+  when:
+    - setup_helm_nginx | default(false) | bool
+    - helm_repo_nginx_shared_with_registry | default(true) | bool
+
+- name: Check helm-repo vhost configuration presence
+  ansible.builtin.stat:
+    path: "{{ helm_repo_nginx_vhosts_dir }}/helm-repo-vhosts.conf"
+  register: helm_repo_vhosts_conf_stat
+  when:
+    - setup_helm_nginx | default(false) | bool
+    - helm_repo_nginx_shared_with_registry | default(true) | bool
+
+- name: Deploy helm-repo vhost stub until role 09 renders real config
+  ansible.builtin.template:
+    src: helm-repo-vhosts.stub.j2
+    dest: "{{ helm_repo_nginx_vhosts_dir }}/helm-repo-vhosts.conf"
+    mode: "0644"
+  when:
+    - setup_helm_nginx | default(false) | bool
+    - helm_repo_nginx_shared_with_registry | default(true) | bool
+    - not helm_repo_vhosts_conf_stat.stat.exists | default(false)
+
+- name: Ensure custom nginx vhost directory exists for registry nginx include
+  ansible.builtin.file:
+    path: "{{ custom_nginx_vhosts_dir }}"
+    state: directory
+    mode: "0755"
+  when:
+    - setup_custom_content_nginx | default(false) | bool
+    - custom_nginx_shared_with_registry | default(true) | bool
+
+- name: Check custom nginx vhost configuration presence
+  ansible.builtin.stat:
+    path: "{{ custom_nginx_vhosts_dir }}/custom-nginx-vhosts.conf"
+  register: custom_nginx_vhosts_conf_stat
+  when:
+    - setup_custom_content_nginx | default(false) | bool
+    - custom_nginx_shared_with_registry | default(true) | bool
+
+- name: Deploy custom nginx vhost stub until role 10 renders real config
+  ansible.builtin.template:
+    src: custom-nginx-vhosts.stub.j2
+    dest: "{{ custom_nginx_vhosts_dir }}/custom-nginx-vhosts.conf"
+    mode: "0644"
+  when:
+    - setup_custom_content_nginx | default(false) | bool
+    - custom_nginx_shared_with_registry | default(true) | bool
+    - not custom_nginx_vhosts_conf_stat.stat.exists | default(false)
+
+- name: Ensure custom nginx mount directories exist for registry nginx compose
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ custom_nginx_www_dir }}"
+    - "{{ custom_nginx_tls_dir }}"
+  when:
+    - setup_custom_content_nginx | default(false) | bool
+    - custom_nginx_shared_with_registry | default(true) | bool
+
+- name: Ensure infra-stats vhost directory exists for registry nginx include
+  ansible.builtin.file:
+    path: "{{ infra_stats_vhosts_dir }}"
+    state: directory
+    mode: "0755"
+  when:
+    - setup_infra_stats | default(false) | bool
+    - infra_stats_shared_with_registry | default(true) | bool
+
+- name: Check infra-stats vhost configuration presence
+  ansible.builtin.stat:
+    path: "{{ infra_stats_vhosts_dir }}/infra-stats-vhosts.conf"
+  register: infra_stats_vhosts_conf_stat
+  when:
+    - setup_infra_stats | default(false) | bool
+    - infra_stats_shared_with_registry | default(true) | bool
+
+- name: Deploy infra-stats vhost stub until role 13 renders real config
+  ansible.builtin.template:
+    src: infra-stats-vhosts.stub.j2
+    dest: "{{ infra_stats_vhosts_dir }}/infra-stats-vhosts.conf"
+    mode: "0644"
+  when:
+    - setup_infra_stats | default(false) | bool
+    - infra_stats_shared_with_registry | default(true) | bool
+    - not infra_stats_vhosts_conf_stat.stat.exists | default(false)
+
+- name: Ensure infra-stats mount directories exist for registry nginx compose
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ infra_stats_html_dir }}"
+    - "{{ infra_stats_tls_dir }}"
+  when:
+    - setup_infra_stats | default(false) | bool
+    - infra_stats_shared_with_registry | default(true) | bool
+
+- name: Deploy registry nginx configuration
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: "{{ registry_nginx_config_dir }}/nginx.conf"
+    mode: "0644"
+  register: registry_nginx_conf_deployed
+
+- name: Deploy registry nginx docker compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ registry_nginx_compose_project_dir }}/docker-compose.yml"
+    mode: "0644"
+  register: registry_nginx_compose_deployed
+
+- name: Mark registry nginx stack pending restart after configuration change
+  ansible.builtin.include_role:
+    name: 06-enable-compose-systemd
+    tasks_from: mark_compose_pending_restart.yaml
+  vars:
+    compose_pending_restart_units:
+      - "{{ compose_systemd_registry_nginx_unit_name }}"
+  when: >-
+    registry_nginx_conf_deployed.changed | default(false) or
+    registry_nginx_compose_deployed.changed | default(false)

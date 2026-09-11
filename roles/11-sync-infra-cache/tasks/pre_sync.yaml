@@ -1,0 +1,153 @@
+---
+- name: Build infra cache sync component list
+  ansible.builtin.set_fact:
+    nginx_cache_sync_components: >-
+      {{
+        []
+        + ([{
+            'name': 'pkg-repo',
+            'local_dir': pkg_repo_nginx_cache_dir,
+            'remote_subdir': nginx_cache_sync_remote_subdir_pkg_repo
+          }] if (nginx_cache_sync_pkg_repo_enabled | bool) else [])
+        + ([{
+            'name': 'helm-repo',
+            'local_dir': helm_repo_nginx_cache_dir,
+            'remote_subdir': nginx_cache_sync_remote_subdir_helm_repo
+          }] if (nginx_cache_sync_helm_repo_enabled | bool) else [])
+        + ([{
+            'name': 'helm-releases',
+            'local_dir': helm_repo_nginx_releases_dir,
+            'remote_subdir': nginx_cache_sync_remote_subdir_helm_releases
+          }] if (nginx_cache_sync_helm_repo_enabled | bool) else [])
+        + ([{
+            'name': 'custom-www',
+            'local_dir': custom_nginx_www_dir,
+            'remote_subdir': nginx_cache_sync_remote_subdir_custom_www
+          }] if (nginx_cache_sync_custom_www_enabled | bool) else [])
+      }}
+
+- name: Export SSH password environment for rsync over sshpass
+  ansible.builtin.set_fact:
+    nginx_cache_sync_ssh_env:
+      SSHPASS: "{{ nginx_cache_sync_ssh_password }}"
+  when: nginx_cache_sync_ssh_auth == 'password'
+  no_log: true
+
+- name: Clear SSH password environment for key auth
+  ansible.builtin.set_fact:
+    nginx_cache_sync_ssh_env: {}
+  when: nginx_cache_sync_ssh_auth == 'key'
+
+- name: Ensure local infra cache directories exist
+  ansible.builtin.file:
+    path: "{{ item.local_dir }}"
+    state: directory
+    mode: "0755"
+  loop: "{{ nginx_cache_sync_components | default([]) }}"
+
+- name: Ensure local registry data directory exists
+  ansible.builtin.file:
+    path: "{{ registry_data_dir }}"
+    state: directory
+    mode: "0755"
+  when: nginx_cache_sync_registry_enabled | bool
+
+- name: Probe SSH connectivity to remote infra cache mirror host
+  ansible.builtin.command:
+    cmd: >-
+      {{ nginx_cache_sync_rsync_rsh }}
+      {{ nginx_cache_sync_ssh_target }}
+      echo ok
+  register: nginx_cache_sync_ssh_probe
+  changed_when: false
+  environment: "{{ nginx_cache_sync_ssh_env | default({}) }}"
+  no_log: "{{ nginx_cache_sync_ssh_auth == 'password' }}"
+
+- name: Require SSH connectivity to remote infra cache mirror host
+  ansible.builtin.assert:
+    that:
+      - nginx_cache_sync_ssh_probe.rc == 0
+      - nginx_cache_sync_ssh_probe.stdout is search('ok')
+    fail_msg: >-
+      Cannot reach {{ nginx_cache_sync_ssh_target }} via SSH
+      (auth={{ nginx_cache_sync_ssh_auth }}).
+
+- name: Ensure remote infra cache mirror directories exist
+  ansible.builtin.command:
+    cmd: >-
+      {{ nginx_cache_sync_rsync_rsh }}
+      {{ nginx_cache_sync_ssh_target }}
+      mkdir -p
+      {{ nginx_cache_sync_remote_dir }}/{{ item.remote_subdir }}
+  loop: "{{ nginx_cache_sync_components | default([]) }}"
+  changed_when: false
+  environment: "{{ nginx_cache_sync_ssh_env | default({}) }}"
+  no_log: "{{ nginx_cache_sync_ssh_auth == 'password' }}"
+
+- name: Ensure remote registry mirror directory exists
+  ansible.builtin.command:
+    cmd: >-
+      {{ nginx_cache_sync_rsync_rsh }}
+      {{ nginx_cache_sync_ssh_target }}
+      mkdir -p {{ nginx_cache_sync_remote_dir }}/{{ nginx_cache_sync_remote_subdir_registry }}
+  changed_when: false
+  when: nginx_cache_sync_registry_enabled | bool
+  environment: "{{ nginx_cache_sync_ssh_env | default({}) }}"
+  no_log: "{{ nginx_cache_sync_ssh_auth == 'password' }}"
+
+- name: Check free disk space on remote mirror host
+  ansible.builtin.command:
+    cmd: >-
+      {{ nginx_cache_sync_rsync_rsh }}
+      {{ nginx_cache_sync_ssh_target }}
+      df -BG {{ nginx_cache_sync_remote_dir }} | tail -1
+  register: nginx_cache_sync_remote_df
+  changed_when: false
+  when: nginx_cache_sync_direction == 'push'
+  environment: "{{ nginx_cache_sync_ssh_env | default({}) }}"
+  no_log: "{{ nginx_cache_sync_ssh_auth == 'password' }}"
+
+- name: Parse remote free disk space for push
+  ansible.builtin.set_fact:
+    nginx_cache_sync_remote_free_gb: >-
+      {{
+        (nginx_cache_sync_remote_df.stdout.split()[3] | regex_replace('G$', '') | int)
+        if (nginx_cache_sync_remote_df.stdout | default('') | length > 0)
+        else 0
+      }}
+  when: nginx_cache_sync_direction == 'push'
+
+- name: Require enough free disk space on remote mirror host
+  ansible.builtin.assert:
+    that:
+      - nginx_cache_sync_remote_free_gb | int >= nginx_cache_sync_min_free_gb | int
+    fail_msg: >-
+      Remote {{ nginx_cache_sync_remote_dir }} has only
+      {{ nginx_cache_sync_remote_free_gb }}G free;
+      need at least {{ nginx_cache_sync_min_free_gb }}G.
+  when: nginx_cache_sync_direction == 'push'
+
+- name: Require enough free disk space on local host for pull
+  ansible.builtin.shell: |
+    set -euo pipefail
+    min_free={{ nginx_cache_sync_min_free_gb }}
+    check_path() {
+      local path="$1"
+      mkdir -p "$path"
+      local free
+      free="$(df -BG "$path" | tail -1 | awk '{print $4}' | tr -d G)"
+      if [ "$free" -lt "$min_free" ]; then
+        echo "FAIL: $path has only ${free}G free (need ${min_free}G)" >&2
+        exit 1
+      fi
+    }
+    {% for item in nginx_cache_sync_components | default([]) %}
+    check_path "{{ item.local_dir }}"
+    {% endfor %}
+    {% if nginx_cache_sync_registry_enabled | bool %}
+    check_path "{{ registry_data_dir }}"
+    {% endif %}
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when: nginx_cache_sync_direction == 'pull'

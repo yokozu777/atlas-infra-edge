@@ -1,0 +1,30 @@
+---
+# Fail if a stop-target is still running (stop uses failed_when: false).
+# Compose rc!=0 (missing project/file) is a fail — do not extract into live mounts.
+
+- name: Assert infra cache seed target compose has no running containers
+  ansible.builtin.command:
+    cmd: docker compose ps -q
+    chdir: "{{ item.project_dir }}"
+  register: infra_cache_seed_assert_ps
+  changed_when: false
+  failed_when: >-
+    (infra_cache_seed_assert_ps.rc | default(1) | int) != 0
+    or (infra_cache_seed_assert_ps.stdout | default('') | trim | length) > 0
+  loop: "{{ infra_cache_seed_stop_targets | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: (item.project_dir | default('') | length) > 0
+
+- name: Assert infra cache seed target systemd unit is inactive
+  ansible.builtin.command:
+    cmd: systemctl is-active {{ item.unit }}.service
+  register: infra_cache_seed_assert_unit
+  changed_when: false
+  failed_when: infra_cache_seed_assert_unit.stdout | default('') == 'active'
+  loop: "{{ infra_cache_seed_stop_targets | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - setup_compose_systemd | default(false) | bool
+    - (item.unit | default('') | length) > 0

@@ -1,0 +1,66 @@
+---
+- name: Reset pkg repo cache warm slug list
+  ansible.builtin.set_fact:
+    pkg_repo_cache_warm_slugs: []
+
+- name: Build enabled pkg repo cache warm slug list
+  ansible.builtin.set_fact:
+    pkg_repo_cache_warm_slugs: >-
+      {{
+        pkg_repo_cache_warm_slugs | default([])
+        + [upstream.slug]
+      }}
+  loop: "{{ pkg_repo_upstreams }}"
+  loop_control:
+    loop_var: upstream
+  vars:
+    _enable_key: "enable_repo_{{ upstream.slug | replace('.', '_') | replace('-', '_') }}"
+  when:
+    - pkg_repo_nginx_cache_warm_enabled | default(true) | bool
+    - >-
+      (lookup('vars', _enable_key, default=false) | bool)
+      or (
+        upstream.slug in ['pgdg-apt', 'pgdg-yum']
+        and (lookup('vars', 'enable_repo_pgdg', default=false) | bool)
+      )
+
+- name: Deploy pkg-repo cache warm script
+  ansible.builtin.template:
+    src: warm-pkg-repo-cache.sh.j2
+    dest: "{{ pkg_repo_nginx_compose_project_dir }}/warm-pkg-repo-cache.sh"
+    mode: "0755"
+  when:
+    - pkg_repo_nginx_cache_warm_enabled | default(true) | bool
+    - pkg_repo_cache_warm_slugs | default([]) | length > 0
+
+- name: Wait for pkg-repo nginx HTTPS before metadata warm
+  ansible.builtin.import_tasks: wait_for_https.yaml
+
+- name: Warm pkg-repo nginx metadata cache via curl
+  ansible.builtin.command:
+    cmd: "{{ pkg_repo_nginx_compose_project_dir }}/warm-pkg-repo-cache.sh"
+  register: pkg_repo_cache_warm_result
+  # Best-effort: never fail the infra phase on a slow/partial CDN warm.
+  failed_when: false
+  changed_when: pkg_repo_cache_warm_result.rc == 0
+  when:
+    - pkg_repo_nginx_cache_warm_enabled | default(true) | bool
+    - pkg_repo_cache_warm_slugs | default([]) | length > 0
+  async: "{{ pkg_repo_nginx_cache_warm_timeout | default(300) }}"
+  poll: 10
+
+- name: Report pkg-repo cache warm outcome
+  ansible.builtin.debug:
+    msg: >-
+      pkg-repo cache warm rc={{ pkg_repo_cache_warm_result.rc | default('n/a') }}
+      mode={{ pkg_repo_nginx_cache_warm_mode | default('light') }}
+      slugs={{ pkg_repo_cache_warm_slugs | default([]) | length }}
+  when: pkg_repo_cache_warm_result is defined
+
+- name: Clear pkg-repo cache warm pending flag in fact cache after warm attempt
+  ansible.builtin.set_fact:
+    pkg_repo_cache_warm_pending: false
+    cacheable: true
+  when:
+    - pkg_repo_cache_warm_slugs | default([]) | length == 0
+      or pkg_repo_cache_warm_result is defined

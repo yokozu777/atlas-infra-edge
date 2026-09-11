@@ -1,0 +1,152 @@
+---
+# Skip extract when stamp sha256 matches a remote imagetools probe or pulled
+# RepoDigests id, components match, and every dest tree has a regular file.
+
+- name: Reset infra cache seed skip-load bookkeeping
+  ansible.builtin.set_fact:
+    infra_cache_seed_skip_load: false
+    infra_cache_seed_skip_reason: not_evaluated
+    infra_cache_seed_dest_empty: false
+    infra_cache_seed_digest_ids: []
+    infra_cache_seed_stamp_digest_id: ""
+
+- name: Skip stamp compare when skip-if-same is disabled
+  ansible.builtin.set_fact:
+    infra_cache_seed_skip_reason: skip_if_same_disabled
+  when: not (infra_cache_seed_load_skip_if_same_digest | default(true) | bool)
+
+- name: Normalize infra cache seed repo digest ids
+  ansible.builtin.set_fact:
+    infra_cache_seed_digest_ids: >-
+      {{
+        infra_cache_seed_repo_digests | default([])
+        | map('trim')
+        | map('lower')
+        | map('regex_replace', '^.*@', '')
+        | select('match', '^sha256:[0-9a-f]{64}$')
+        | list
+      }}
+  when: infra_cache_seed_load_skip_if_same_digest | default(true) | bool
+
+- name: Evaluate infra cache seed load stamp
+  when: infra_cache_seed_load_skip_if_same_digest | default(true) | bool
+  block:
+    - name: Stat local infra cache seed stamp
+      ansible.builtin.stat:
+        path: "{{ infra_cache_seed_load_stamp_path }}"
+      register: infra_cache_seed_stamp_stat
+
+    - name: Mark load required when local stamp is missing
+      ansible.builtin.set_fact:
+        infra_cache_seed_skip_reason: no_local_stamp
+      when: not (infra_cache_seed_stamp_stat.stat.exists | default(false))
+
+    - name: Read local infra cache seed stamp
+      ansible.builtin.slurp:
+        path: "{{ infra_cache_seed_load_stamp_path }}"
+      register: infra_cache_seed_stamp_slurp
+      when:
+        - infra_cache_seed_stamp_stat.stat.exists | default(false)
+        - infra_cache_seed_skip_reason == 'not_evaluated'
+
+    - name: Parse local infra cache seed stamp
+      when:
+        - infra_cache_seed_stamp_stat.stat.exists | default(false)
+        - infra_cache_seed_skip_reason == 'not_evaluated'
+      block:
+        - name: Decode local infra cache seed stamp YAML
+          ansible.builtin.set_fact:
+            infra_cache_seed_stamp_data: "{{ infra_cache_seed_stamp_slurp.content | b64decode | from_yaml }}"
+
+        - name: Require stamp digest and mapping
+          ansible.builtin.assert:
+            that:
+              - infra_cache_seed_stamp_data is mapping
+              - (infra_cache_seed_stamp_data.image | default('') | length) > 0
+              - (infra_cache_seed_stamp_data.tag | default('') | length) > 0
+              - (infra_cache_seed_stamp_data.digest | default('') | length) > 0
+            fail_msg: infra cache seed stamp missing image/tag/digest
+      rescue:
+        - name: Mark load required when local stamp is unreadable
+          ansible.builtin.set_fact:
+            infra_cache_seed_skip_reason: stamp_unreadable
+            infra_cache_seed_stamp_data: {}
+
+    - name: Normalize local infra cache seed stamp digest id
+      ansible.builtin.set_fact:
+        infra_cache_seed_stamp_digest_id: >-
+          {{
+            (infra_cache_seed_stamp_data.digest | default('') | trim | lower).split('@') | last
+          }}
+      when:
+        - infra_cache_seed_stamp_stat.stat.exists | default(false)
+        - infra_cache_seed_skip_reason == 'not_evaluated'
+
+    - name: Probe infra cache seed destination trees
+      ansible.builtin.shell: |
+        set -euo pipefail
+        empty=0
+        {% for item in infra_cache_seed_components | default([]) %}
+        dest={{ item.host_dir | quote }}
+        if [ ! -d "$dest" ] || [ -z "$(find "$dest" -type f -print -quit 2>/dev/null)" ]; then
+          echo "empty {{ item.name }}"
+          empty=1
+        fi
+        {% endfor %}
+        exit 0
+      args:
+        executable: /bin/bash
+      register: infra_cache_seed_dest_probe
+      changed_when: false
+      when:
+        - infra_cache_seed_stamp_stat.stat.exists | default(false)
+        - infra_cache_seed_skip_reason == 'not_evaluated'
+
+    - name: Mark load required when a destination tree is empty
+      ansible.builtin.set_fact:
+        infra_cache_seed_skip_reason: dest_empty
+        infra_cache_seed_dest_empty: true
+      when:
+        - infra_cache_seed_stamp_stat.stat.exists | default(false)
+        - infra_cache_seed_skip_reason == 'not_evaluated'
+        - (infra_cache_seed_dest_probe.stdout | default('') | trim | length) > 0
+
+    - name: Mark load required when stamp digest, image, or components drifted
+      ansible.builtin.set_fact:
+        infra_cache_seed_skip_reason: stamp_mismatch
+      when:
+        - infra_cache_seed_stamp_stat.stat.exists | default(false)
+        - infra_cache_seed_skip_reason == 'not_evaluated'
+        - >-
+          (infra_cache_seed_stamp_data.components | default([]) is string)
+          or (infra_cache_seed_stamp_data.image | default('')) != (infra_cache_seed_image | string)
+          or (infra_cache_seed_stamp_data.tag | default('')) != (infra_cache_seed_tag | string)
+          or not (infra_cache_seed_stamp_digest_id is match('^sha256:[0-9a-f]{64}$'))
+          or (
+            infra_cache_seed_stamp_digest_id
+            not in (infra_cache_seed_digest_ids | default([]))
+          )
+          or (
+            (infra_cache_seed_stamp_data.components | default([])) | sort
+          ) != (
+            (infra_cache_seed_components | default([]) | map(attribute='name') | list) | sort
+          )
+
+    - name: Skip extract when stamp sha256 matches remote or pulled image and dest has files
+      ansible.builtin.set_fact:
+        infra_cache_seed_skip_load: true
+        infra_cache_seed_skip_reason: digest_match
+      when:
+        - infra_cache_seed_stamp_stat.stat.exists | default(false)
+        - infra_cache_seed_skip_reason == 'not_evaluated'
+
+- name: Log infra cache seed load freshness decision
+  ansible.builtin.debug:
+    msg: >-
+      atlas_infra_cache_seed
+      {{ 'skipped_same' if (infra_cache_seed_skip_load | default(false) | bool) else 'load' }}
+      reason={{ infra_cache_seed_skip_reason | default('unknown') }}
+      image={{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}
+      digest={{ infra_cache_seed_image_digest | default('') }}
+      sha256={{ infra_cache_seed_digest_ids | default([]) | first | default('') }}
+      stamp={{ infra_cache_seed_load_stamp_path }}

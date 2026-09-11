@@ -1,0 +1,15 @@
+---
+- name: Persist compose stacks pending restart in fact cache
+  ansible.builtin.set_fact:
+    compose_stacks_pending_restart: "{{ _compose_pending_restart_merged }}"
+    cacheable: true
+  vars:
+    _compose_pending_restart_merged: >-
+      {{
+        (
+          ansible_facts.get('compose_stacks_pending_restart', [])
+          + compose_pending_restart_units
+        )
+        | unique
+        | sort
+      }}

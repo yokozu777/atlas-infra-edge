@@ -1,0 +1,145 @@
+---
+- name: Reset helm repo cache warm plan
+  ansible.builtin.set_fact:
+    helm_repo_cache_warm_plan: []
+    helm_repo_releases_warm_plan: []
+
+- name: Build helm repo cache warm plan from specs
+  ansible.builtin.set_fact:
+    helm_repo_cache_warm_plan: >-
+      {{
+        helm_repo_cache_warm_plan | default([])
+        + [{
+          'repo': item.repo,
+          'chart': item.chart,
+          'version': (
+            lookup('vars', item.version_var, default='')
+            if (item.version_var | default('') | length > 0)
+            else (item.version | default(''))
+          ) | default('') | trim,
+          'mirror_host': item.repo | helm_repo_proxy_hostname(helm_repo_nginx_ingress_domain),
+        }]
+      }}
+  loop: "{{ helm_repo_cache_warm_specs | default([]) }}"
+  loop_control:
+    loop_var: item
+  when:
+    - helm_repo_nginx_cache_warm_enabled | default(true) | bool
+    - item.repo is defined
+    - item.chart is defined
+
+- name: Build GitHub releases file-store warm plan from specs
+  ansible.builtin.set_fact:
+    helm_repo_releases_warm_plan: >-
+      {{
+        helm_repo_releases_warm_plan | default([])
+        + [{
+          'path': (item.path | default('') | trim | regex_replace('^/+', ''))
+        }]
+      }}
+  loop: "{{ helm_repo_releases_warm_specs | default([]) }}"
+  loop_control:
+    loop_var: item
+  when:
+    - helm_repo_nginx_cache_warm_enabled | default(true) | bool
+    - (item.path | default('') | trim | length) > 0
+
+- name: Collect helm repo mirror hosts for HTTPS wait
+  ansible.builtin.set_fact:
+    helm_repo_cache_warm_mirror_hosts: >-
+      {{
+        helm_repo_cache_warm_plan | default([])
+        | map(attribute='mirror_host')
+        | list
+        | unique
+      }}
+  when: helm_repo_cache_warm_plan | default([]) | length > 0
+
+- name: Deploy helm-repo cache warm script
+  ansible.builtin.template:
+    src: warm-helm-repo-cache.py.j2
+    dest: "{{ helm_repo_nginx_compose_project_dir }}/warm-helm-repo-cache.py"
+    mode: "0755"
+  when:
+    - helm_repo_nginx_cache_warm_enabled | default(true) | bool
+    - helm_repo_cache_warm_plan | default([]) | length > 0
+
+- name: Deploy helm-repo cache warm plan
+  ansible.builtin.copy:
+    dest: "{{ helm_repo_nginx_compose_project_dir }}/helm-repo-cache-warm-plan.json"
+    content: "{{ helm_repo_cache_warm_plan | to_nice_json }}"
+    mode: "0644"
+  when:
+    - helm_repo_nginx_cache_warm_enabled | default(true) | bool
+    - helm_repo_cache_warm_plan | default([]) | length > 0
+
+- name: Deploy GitHub releases file-store warm script
+  ansible.builtin.template:
+    src: warm-helm-releases.py.j2
+    dest: "{{ helm_repo_nginx_compose_project_dir }}/warm-helm-releases.py"
+    mode: "0755"
+  when:
+    - helm_repo_nginx_cache_warm_enabled | default(true) | bool
+    - helm_repo_releases_warm_plan | default([]) | length > 0
+
+- name: Deploy GitHub releases file-store warm plan
+  ansible.builtin.copy:
+    dest: "{{ helm_repo_nginx_compose_project_dir }}/helm-releases-warm-plan.json"
+    content: "{{ helm_repo_releases_warm_plan | to_nice_json }}"
+    mode: "0644"
+  when:
+    - helm_repo_nginx_cache_warm_enabled | default(true) | bool
+    - helm_repo_releases_warm_plan | default([]) | length > 0
+
+- name: Install PyYAML for helm-repo cache warm (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name: "{{ helm_repo_nginx_cache_warm_pyyaml_package_debian }}"
+    state: present
+    install_recommends: false
+  when:
+    - helm_repo_nginx_cache_warm_enabled | default(true) | bool
+    - helm_repo_cache_warm_plan | default([]) | length > 0
+    - ansible_facts['os_family'] == 'Debian'
+
+- name: Install PyYAML for helm-repo cache warm (Red Hat family)
+  ansible.builtin.dnf:
+    name: "{{ helm_repo_nginx_cache_warm_pyyaml_package_redhat }}"
+    state: present
+    install_weak_deps: false
+  when:
+    - helm_repo_nginx_cache_warm_enabled | default(true) | bool
+    - helm_repo_cache_warm_plan | default([]) | length > 0
+    - ansible_facts['os_family'] == 'RedHat'
+
+- name: Assert PyYAML is importable for helm-repo cache warm
+  ansible.builtin.command:
+    argv: [python3, -c, "import yaml"]
+  changed_when: false
+  when:
+    - helm_repo_nginx_cache_warm_enabled | default(true) | bool
+    - helm_repo_cache_warm_plan | default([]) | length > 0
+
+- name: Wait for helm-repo nginx HTTPS before chart cache warm
+  ansible.builtin.import_tasks: wait_for_https.yaml
+
+- name: Warm helm-repo nginx chart cache via internal mirror
+  ansible.builtin.command:
+    cmd: "{{ helm_repo_nginx_compose_project_dir }}/warm-helm-repo-cache.py"
+  register: helm_repo_cache_warm_result
+  changed_when: helm_repo_cache_warm_result.rc == 0
+  when:
+    - helm_repo_nginx_cache_warm_enabled | default(true) | bool
+    - helm_repo_cache_warm_plan | default([]) | length > 0
+  async: "{{ helm_repo_nginx_cache_warm_timeout | default(3600) }}"
+  poll: 30
+
+- name: Warm GitHub Releases file store via github.com
+  ansible.builtin.command:
+    cmd: "{{ helm_repo_nginx_compose_project_dir }}/warm-helm-releases.py"
+  register: helm_repo_releases_warm_result
+  changed_when: helm_repo_releases_warm_result.rc == 0
+  when:
+    - helm_repo_nginx_cache_warm_enabled | default(true) | bool
+    - helm_repo_releases_warm_plan | default([]) | length > 0
+  async: "{{ helm_repo_nginx_cache_warm_timeout | default(3600) }}"
+  poll: 30

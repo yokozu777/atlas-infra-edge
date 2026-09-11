@@ -1,0 +1,72 @@
+---
+# Set nginx_cache_sync_remote_fingerprint from one SSH: du -sb per enabled component.
+# Requires pre_sync/validate facts (components list, ssh transport, registry flags).
+
+- name: Build remote paths for cache sync fingerprint
+  ansible.builtin.set_fact:
+    nginx_cache_sync_fingerprint_paths: >-
+      {{
+        (
+          nginx_cache_sync_components | default([])
+          | map('combine', {'exclude_certs': false})
+          | list
+        )
+        + (
+          [{
+            'name': 'registry',
+            'remote_subdir': nginx_cache_sync_remote_subdir_registry,
+            'exclude_certs': true
+          }] if (nginx_cache_sync_registry_enabled | bool) else []
+        )
+      }}
+
+- name: Collect remote cache sizes for fingerprint
+  ansible.builtin.shell: |
+    set -euo pipefail
+    {{ nginx_cache_sync_rsync_rsh }} {{ nginx_cache_sync_ssh_target | quote }} bash -s <<'REMOTE_EOF'
+    set -euo pipefail
+    emit() {
+      local name="$1"
+      local path="$2"
+      local exclude_certs="$3"
+      local size="0"
+      if [ -d "$path" ]; then
+        if [ "$exclude_certs" = "1" ]; then
+          size="$(du -sb --exclude=certs "$path" | awk '{print $1}')"
+        else
+          size="$(du -sb "$path" | awk '{print $1}')"
+        fi
+      fi
+      printf '%s %s\n' "$name" "$size"
+    }
+    {% for item in nginx_cache_sync_fingerprint_paths | default([]) %}
+    emit {{ item.name | quote }} {{ (nginx_cache_sync_remote_dir ~ '/' ~ item.remote_subdir) | quote }} {{ 1 if (item.exclude_certs | default(false) | bool) else 0 }}
+    {% endfor %}
+    REMOTE_EOF
+  args:
+    executable: /bin/bash
+  register: nginx_cache_sync_remote_du
+  changed_when: false
+  environment: "{{ nginx_cache_sync_ssh_env | default({}) }}"
+  no_log: "{{ nginx_cache_sync_ssh_auth == 'password' }}"
+
+- name: Derive cache sync remote fingerprint
+  ansible.builtin.set_fact:
+    nginx_cache_sync_remote_fingerprint: >-
+      {{
+        (
+          [
+            'host=' ~ (nginx_cache_sync_remote_host | string),
+            'port=' ~ (nginx_cache_sync_remote_port | string),
+            'dir=' ~ (nginx_cache_sync_remote_dir | string),
+            'components=' ~ (
+              nginx_cache_sync_fingerprint_paths | default([])
+              | map(attribute='name')
+              | list
+              | join(',')
+            ),
+            (nginx_cache_sync_remote_du.stdout | default('') | trim)
+          ] | join('\n')
+        ) | hash('sha256')
+      }}
+    nginx_cache_sync_remote_du_stdout: "{{ nginx_cache_sync_remote_du.stdout | default('') | trim }}"

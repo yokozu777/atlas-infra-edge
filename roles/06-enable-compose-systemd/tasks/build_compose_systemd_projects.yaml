@@ -1,0 +1,5 @@
+---
+# Phase 2: project list is derived from infra_compose_stacks via compose_stacks_to_projects.
+- name: Build compose systemd projects list from infra_compose_stacks
+  ansible.builtin.set_fact:
+    compose_systemd_projects: "{{ infra_compose_stacks | compose_stacks_to_projects(vars) }}"

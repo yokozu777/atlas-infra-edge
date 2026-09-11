@@ -1,0 +1,161 @@
+---
+# Phase 1 render: dirs/TLS scripts/compose + mark_pending.
+# TLS cert issue needs provisioned step-ca — deferred to pre_start on cold path
+# (compose_render before compose_start_core ACME). No docker pull / stack start.
+
+- name: Require step-ca when registry TLS is enabled
+  ansible.builtin.assert:
+    that:
+      - setup_stepca | default(false) | bool
+    fail_msg: registry_tls_enabled requires setup_stepca=true.
+  when: registry_tls_enabled | default(false) | bool
+
+- name: Check step-ca provision state for registry TLS
+  ansible.builtin.stat:
+    path: "{{ stepca_provisioned_marker }}"
+  register: stepca_provisioned_for_registry_tls
+  when: registry_tls_enabled | default(false) | bool
+
+- name: Defer registry TLS cert issue until step-ca is provisioned
+  ansible.builtin.debug:
+    msg: >-
+      step-ca not provisioned yet (missing {{ stepca_provisioned_marker }});
+      deferring registry TLS issue to compose_start_registry pre_start.
+  when:
+    - registry_tls_enabled | default(false) | bool
+    - not (stepca_provisioned_for_registry_tls.stat.exists | default(false))
+
+- name: Build registry proxy upstreams from containerd_registry_mirrors
+  ansible.builtin.set_fact:
+    registry_proxy_upstreams: >-
+      {{
+        registry_proxy_upstreams | default([])
+        + [mirror | combine({
+          'proxy_port': registry_proxy_port_base | int + (registry_proxy_upstreams | default([]) | length),
+          'data_subdir': mirror.dir_name | regex_replace('[^a-zA-Z0-9._-]', '_'),
+          'service_name': 'proxy-' ~ (mirror.dir_name | regex_replace('[^a-zA-Z0-9._-]', '-')),
+          'proxy_slug': mirror.dir_name | regex_replace('[^a-zA-Z0-9._-]', '-') | replace('.', '-'),
+          'proxy_hostname': mirror.dir_name | registry_mirror_host(registry_ingress_domain),
+          'upstream_host': mirror.server | regex_replace('^https://', '') | regex_replace('/.*$', '')
+        })]
+      }}
+  loop: "{{ containerd_registry_mirrors }}"
+  loop_control:
+    loop_var: mirror
+  when:
+    - mirror.direct is not defined
+    - mirror.server is match('^https://[^/]*\\.[^/]+/?$')
+    - mirror.server not in (registry_proxy_upstreams | default([]) | map(attribute='server') | list)
+
+- name: Ensure registry proxy data directories exist
+  ansible.builtin.file:
+    path: "{{ registry_data_dir }}/{{ item.data_subdir }}"
+    state: directory
+    mode: "0755"
+  loop: "{{ registry_proxy_upstreams }}"
+
+- name: Ensure registry compose project directory exists
+  ansible.builtin.file:
+    path: "{{ registry_compose_project_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Ensure registry TLS directory exists
+  ansible.builtin.file:
+    path: "{{ registry_tls_dir }}"
+    state: directory
+    mode: "0755"
+  when: registry_tls_enabled | default(false) | bool
+
+- name: Deploy registry TLS certificate issuance script
+  ansible.builtin.template:
+    src: issue-registry-tls-cert.sh.j2
+    dest: "{{ registry_compose_project_dir }}/issue-registry-tls-cert.sh"
+    mode: "0700"
+  register: registry_issue_script_deployed
+  when: registry_tls_enabled | default(false) | bool
+
+- name: Install cron package for registry TLS renewal (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name: cron
+    state: present
+  when:
+    - registry_tls_enabled | default(false) | bool
+    - registry_tls_cron_enabled | default(false) | bool
+    - ansible_facts['os_family'] == 'Debian'
+
+- name: Install cron package for registry TLS renewal (Red Hat family)
+  ansible.builtin.dnf:
+    name: cronie
+    state: present
+  when:
+    - registry_tls_enabled | default(false) | bool
+    - registry_tls_cron_enabled | default(false) | bool
+    - ansible_facts['os_family'] == 'RedHat'
+
+- name: Deploy registry TLS renewal script
+  ansible.builtin.template:
+    src: renew-registry-tls-cert.sh.j2
+    dest: "{{ registry_compose_project_dir }}/renew-registry-tls-cert.sh"
+    mode: "0700"
+  when:
+    - registry_tls_enabled | default(false) | bool
+    - registry_tls_cron_enabled | default(false) | bool
+
+- name: Install registry TLS renewal cron job
+  ansible.builtin.template:
+    src: registry-tls-renew.cron.j2
+    dest: /etc/cron.d/registry-tls-renew
+    mode: "0644"
+  when:
+    - registry_tls_enabled | default(false) | bool
+    - registry_tls_cron_enabled | default(false) | bool
+
+- name: Resolve cron systemd unit for registry TLS renewal
+  ansible.builtin.set_fact:
+    registry_tls_cron_systemd_unit: >-
+      {{
+        registry_tls_cron_systemd_unit_override | default('')
+        if (registry_tls_cron_systemd_unit_override | default('') | length > 0)
+        else ('crond' if ansible_facts['os_family'] == 'RedHat' else 'cron')
+      }}
+  when:
+    - registry_tls_enabled | default(false) | bool
+    - registry_tls_cron_enabled | default(false) | bool
+
+- name: Ensure cron service is enabled for registry TLS renewal
+  ansible.builtin.systemd:
+    name: "{{ registry_tls_cron_systemd_unit }}"
+    enabled: true
+    state: started
+  when:
+    - registry_tls_enabled | default(false) | bool
+    - registry_tls_cron_enabled | default(false) | bool
+
+- name: Issue registry TLS when step-ca is already provisioned
+  ansible.builtin.import_tasks: issue_tls.yaml
+  when:
+    - registry_tls_enabled | default(false) | bool
+    - stepca_provisioned_for_registry_tls.stat.exists | default(false)
+
+- name: Deploy registry docker compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ registry_compose_project_dir }}/docker-compose.yml"
+    mode: "0644"
+  register: registry_compose_deployed
+
+- name: Mark registry stacks pending restart after configuration change
+  ansible.builtin.include_role:
+    name: 06-enable-compose-systemd
+    tasks_from: mark_compose_pending_restart.yaml
+  vars:
+    compose_pending_restart_units: >-
+      {{
+        [compose_systemd_registry_unit_name]
+        + ([compose_systemd_registry_nginx_unit_name] if (setup_registry_nginx | default(false) | bool) else [])
+      }}
+  when: >-
+    registry_compose_deployed.changed | default(false) or
+    registry_tls_cert_issued.changed | default(false) or
+    registry_issue_script_deployed.changed | default(false)

@@ -1,0 +1,8 @@
+---
+- ansible.builtin.import_tasks: build_rsync_jobs.yaml
+
+- ansible.builtin.import_tasks: rsync_serial.yaml
+  when: not (nginx_cache_sync_parallel | default(false) | bool)
+
+- ansible.builtin.import_tasks: rsync_parallel.yaml
+  when: nginx_cache_sync_parallel | default(false) | bool
