@@ -25,7 +25,7 @@
       {{
         infra_cache_seed_extract_argv
         + [
-            infra_cache_seed_image ~ ':' ~ infra_cache_seed_tag,
+            infra_cache_seed_ref,
             '/bin/sh',
             '/extract.sh'
           ]

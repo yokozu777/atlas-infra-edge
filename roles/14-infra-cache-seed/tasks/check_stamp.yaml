@@ -146,7 +146,7 @@
       atlas_infra_cache_seed
       {{ 'skipped_same' if (infra_cache_seed_skip_load | default(false) | bool) else 'load' }}
       reason={{ infra_cache_seed_skip_reason | default('unknown') }}
-      image={{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}
+      image={{ infra_cache_seed_ref }}
       digest={{ infra_cache_seed_image_digest | default('') }}
       sha256={{ infra_cache_seed_digest_ids | default([]) | first | default('') }}
       stamp={{ infra_cache_seed_load_stamp_path }}

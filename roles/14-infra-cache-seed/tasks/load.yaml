@@ -9,6 +9,15 @@
     infra_cache_seed_image: "{{ infra_cache_seed_load_image }}"
     infra_cache_seed_tag: "{{ infra_cache_seed_load_tag }}"
 
+- name: Compose infra cache seed load reference
+  ansible.builtin.set_fact:
+    infra_cache_seed_ref: >-
+      {{
+        infra_cache_seed_image
+        if (':' in (infra_cache_seed_image.split('/') | last))
+        else (infra_cache_seed_image ~ ':' ~ infra_cache_seed_tag)
+      }}
+
 - name: Select infra cache seed load registry credentials
   ansible.builtin.set_fact:
     infra_cache_seed_registry_user: "{{ infra_cache_seed_load_registry_user }}"
@@ -45,7 +54,7 @@
           - inspect
           - --format
           - "{{ '{{' }}.Digest{{ '}}' }}"
-          - "{{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}"
+          - "{{ infra_cache_seed_ref }}"
       register: infra_cache_seed_imagetools
       changed_when: false
       failed_when: false
@@ -83,7 +92,7 @@
             argv:
               - docker
               - pull
-              - "{{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}"
+              - "{{ infra_cache_seed_ref }}"
           async: "{{ infra_cache_seed_load_timeout_sec | int }}"
           poll: "{{ infra_cache_seed_async_poll_sec | int }}"
 
@@ -95,7 +104,7 @@
               - inspect
               - --format
               - "{{ '{{' }}json .RepoDigests{{ '}}' }}"
-              - "{{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}"
+              - "{{ infra_cache_seed_ref }}"
           register: infra_cache_seed_inspect
           changed_when: false
 
@@ -125,7 +134,7 @@
               - (infra_cache_seed_image_digest | default('') | length) > 0
               - (infra_cache_seed_repo_digests | default([]) | length) > 0
             fail_msg: >-
-              Seed image {{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}
+              Seed image {{ infra_cache_seed_ref }}
               has no RepoDigests after docker pull.
 
         - ansible.builtin.include_tasks: check_stamp.yaml
@@ -141,7 +150,7 @@
               - --rm
               - --entrypoint
               - du
-              - "{{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}"
+              - "{{ infra_cache_seed_ref }}"
               - -sb
               - /seed
           register: infra_cache_seed_du
@@ -161,7 +170,7 @@
               - --rm
               - --entrypoint
               - cat
-              - "{{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}"
+              - "{{ infra_cache_seed_ref }}"
               - /seed/MANIFEST
           register: infra_cache_seed_manifest
           changed_when: false
@@ -171,7 +180,7 @@
             that:
               - item.name in (infra_cache_seed_manifest.stdout_lines | default([]))
             fail_msg: >-
-              Seed image {{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}
+              Seed image {{ infra_cache_seed_ref }}
               MANIFEST is missing component {{ item.name }}.
               Load include must be a subset of published components.
           loop: "{{ infra_cache_seed_components | default([]) }}"

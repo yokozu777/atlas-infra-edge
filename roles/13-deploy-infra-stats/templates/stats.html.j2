@@ -6,23 +6,31 @@
   <title>Infra stats — {{ dns_domain_suffix | default('lab') }}</title>
   <style>
     :root {
-      --bg: #0f1419;
-      --panel: #1a2332;
+      --bg: #000;
+      --panel: #111;
       --text: #e7ecf3;
       --muted: #9aa8bc;
       --accent: #5b9fd4;
-      --line: #2a3648;
+      --link: #c9e4ff;
+      --line: #2a2a2a;
       --ok: #3d9a6a;
       --off: #8a6a3d;
+      --tab: #0a0a0a;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
-      background: radial-gradient(1200px 600px at 10% -10%, #1c2a3d, var(--bg));
+      background: #000;
       color: var(--text);
       line-height: 1.45;
     }
+    a {
+      color: var(--link);
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+    a:hover { color: #fff; }
     header {
       padding: 1.5rem 1.25rem 0.75rem;
       border-bottom: 1px solid var(--line);
@@ -35,15 +43,94 @@
       letter-spacing: 0.01em;
     }
     header p { margin: 0; color: var(--muted); font-size: 0.95rem; }
-    header a { color: var(--accent); }
+    header a { color: var(--link); }
+    .action-row {
+      display: grid;
+      grid-template-columns: minmax(12rem, 15rem) 1fr;
+      gap: 0.65rem 1rem;
+      align-items: center;
+      padding: 0.7rem 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .action-row:last-child { border-bottom: 0; }
+    .action-row .desc { margin: 0; color: var(--muted); font-size: 0.9rem; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.4rem;
+      min-width: 12rem;
+      padding: 0.45rem 0.75rem;
+      border-radius: 6px;
+      background: #1a1a1a;
+      color: #f4f9ff;
+      text-decoration: none;
+      border: 1px solid #8ec0ee;
+      font-weight: 650;
+      font-size: 0.86rem;
+    }
+    .btn:hover { background: #262626; color: #fff; }
+    .icon {
+      width: 1rem;
+      height: 1rem;
+      flex: 0 0 auto;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 1.8;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .tabs {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      padding: 0.65rem 1.25rem;
+      background: #000;
+      border-bottom: 1px solid var(--line);
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+    .tabs.sub {
+      position: static;
+      padding: 0.5rem 0 0.25rem;
+      border-bottom: 0;
+      max-width: none;
+    }
+    .tabs button {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      border: 1px solid var(--line);
+      background: var(--tab);
+      color: var(--text);
+      border-radius: 999px;
+      padding: 0.35rem 0.7rem;
+      cursor: pointer;
+      font: inherit;
+      font-size: 0.84rem;
+      font-weight: 600;
+    }
+    .tabs button[aria-selected="true"] {
+      background: #2c4c6c;
+      border-color: #8ec0ee;
+      color: #fff;
+    }
+    .tabs button:hover { border-color: #8ec0ee; }
     main {
       padding: 1rem 1.25rem 2.5rem;
       max-width: 1100px;
       margin: 0 auto;
     }
+    [data-panel] { display: none; }
+    [data-panel].is-on { display: block; }
+    [data-subpanel] { display: none; }
+    [data-subpanel].is-on { display: block; }
     section {
       margin-top: 1.25rem;
-      background: color-mix(in srgb, var(--panel) 92%, black);
+      background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 0.9rem 1rem 1rem;
@@ -82,9 +169,48 @@
     .off { background: color-mix(in srgb, var(--off) 35%, transparent); color: #f0d9b0; }
     ul.compact, ul.tight { margin: 0.2rem 0; padding-left: 1.1rem; }
     ul.compact li, ul.tight li { margin: 0.15rem 0; }
+    .host { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 0.84em; }
+    @media (max-width: 640px) {
+      .action-row { grid-template-columns: 1fr; }
+      .btn { width: 100%; min-width: 0; }
+    }
   </style>
 </head>
 <body>
+{% set ca = infra_stats_ca | default({}) %}
+{% set hub = infra_stats_docker_hub | default({}) %}
+{% macro ico(name) -%}
+<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-{{ name }}"></use></svg>
+{%- endmacro %}
+{% macro host_link(name) -%}
+{%- if name.startswith('*.') -%}
+<span class="mono">{{ name }}</span>
+{%- else -%}
+<a class="host" href="https://{{ name }}">{{ name }}</a>
+{%- endif -%}
+{%- endmacro %}
+{% macro cache_label(tid) -%}
+{%- if tid == 'pkg-metadata' -%}APT / YUM metadata
+{%- elif tid == 'pkg-blobs' -%}APT / YUM blobs
+{%- elif tid == 'helm-repo' -%}Helm repos
+{%- elif tid == 'helm-releases' -%}Helm releases
+{%- elif tid == 'registry' -%}Docker / registry
+{%- elif tid == 'custom-www' -%}Custom www
+{%- else -%}{{ tid }}
+{%- endif -%}
+{%- endmacro %}
+  <svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="12" r="4"/><path d="M12 12h9M17 12v3M20 12v2"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/></symbol>
+    <symbol id="i-box" viewBox="0 0 24 24"><path d="M4 8h16v11H4zM4 8l8-4 8 4M12 4v15"/></symbol>
+    <symbol id="i-disk" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 4v6h8V4M8 20v-4h5"/></symbol>
+    <symbol id="i-dns" viewBox="0 0 24 24"><path d="M5 7h14M5 12h14M5 17h14"/><circle cx="8" cy="7" r="1.2" fill="currentColor" stroke="none"/><circle cx="16" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="10" cy="17" r="1.2" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v6l4 2"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M7 4h7l5 5v11H7zM14 4v5h5"/></symbol>
+    <symbol id="i-script" viewBox="0 0 24 24"><path d="M8 6h11M8 12h11M8 18h7"/><path d="M5 6h.01M5 12h.01M5 18h.01"/></symbol>
+    <symbol id="i-json" viewBox="0 0 24 24"><path d="M8 5c-2 0-3 2-3 7s1 7 3 7M16 5c2 0 3 2 3 7s-1 7-3 7"/></symbol>
+  </svg>
   <header>
     <h1>Infra stats · {{ dns_domain_suffix | default('lab') }}</h1>
     <p>
@@ -93,8 +219,18 @@
       · host <span class="mono">{{ infra_stats_hostname }}</span>
     </p>
   </header>
+  <nav class="tabs" role="tablist" data-tabs="main" aria-label="Infra stats">
+    <button type="button" role="tab" data-tab="trust" aria-selected="true">{{ ico('key') }} Trust{% if not (ca.pem_ok | default(false)) %} <span class="badge off">pem missing</span>{% endif %}</button>
+    <button type="button" role="tab" data-tab="endpoints" aria-selected="false">{{ ico('globe') }} Endpoints</button>
+    <button type="button" role="tab" data-tab="mirrors" aria-selected="false">{{ ico('box') }} Mirrors{% if hub.stale | default(false) %} <span class="badge off">stale</span>{% elif hub.error | default('') %} <span class="badge off">failed</span>{% endif %}</button>
+    <button type="button" role="tab" data-tab="cache" aria-selected="false">{{ ico('disk') }} Cache{% if not (infra_stats_cache_scrape_ok | default(true) | bool) %} <span class="badge off">{% if infra_stats_cache_scrape_stale | default(false) | bool %}stale{% else %}failed{% endif %}</span>{% endif %}</button>
+    <button type="button" role="tab" data-tab="dns" aria-selected="false">{{ ico('dns') }} DNS{% if not (infra_stats_bind_scrape_ok | default(true) | bool) %} <span class="badge off">{% if infra_stats_bind_scrape_stale | default(false) | bool %}stale{% else %}failed{% endif %}</span>{% endif %}</button>
+    <button type="button" role="tab" data-tab="time" aria-selected="false">{{ ico('clock') }} Time{% if (setup_ntp | default(false) | bool) and not (infra_stats_ntp_scrape_ok | default(true) | bool) %} <span class="badge off">{% if infra_stats_ntp_scrape_stale | default(false) | bool %}stale{% else %}failed{% endif %}</span>{% endif %}</button>
+    <button type="button" role="tab" data-tab="tls" aria-selected="false">{{ ico('lock') }} TLS{% if not (infra_stats_known_scrape_ok | default(true) | bool) or not (infra_stats_issued_scrape_ok | default(true) | bool) %} <span class="badge off">{% if (infra_stats_known_scrape_stale | default(false) | bool) or (infra_stats_issued_scrape_stale | default(false) | bool) %}stale{% else %}failed{% endif %}</span>{% endif %}</button>
+  </nav>
   <main>
 
+    <div data-panel="trust" class="is-on">
     <section>
       <h2>Trust / CA</h2>
       <p class="note">
@@ -102,29 +238,36 @@
         Debian/Ubuntu: <span class="mono">update-ca-certificates</span>.
         RHEL/OL: <span class="mono">update-ca-trust extract</span>.
       </p>
-{% set ca = infra_stats_ca | default({}) %}
-      <ul class="tight">
-        <li><a href="{{ ca.pem_path | default('/ca/roots.pem') }}">Root CA PEM</a>
-          <span class="mono">{{ ca.pem_path | default('/ca/roots.pem') }}</span>
-{% if not (ca.pem_ok | default(false)) %}
-          <span class="badge off">pem missing</span>
-{% endif %}
-        </li>
-        <li><a href="{{ ca.debian_sh | default('/ca/install-root-ca-debian.sh') }}">Install on Debian/Ubuntu</a>
-          <span class="mono">{{ ca.debian_sh | default('/ca/install-root-ca-debian.sh') }}</span></li>
-        <li><a href="{{ ca.rhel_sh | default('/ca/install-root-ca-rhel.sh') }}">Install on RHEL/OL</a>
-          <span class="mono">{{ ca.rhel_sh | default('/ca/install-root-ca-rhel.sh') }}</span></li>
+      <div class="action-list">
+      <div class="action-row">
+        <a class="btn" href="{{ ca.pem_path | default('/ca/roots.pem') }}">{{ ico('key') }} Root CA PEM</a>
+        <p class="desc">Lab step-ca root (<span class="mono">{{ ca.pem_path | default('/ca/roots.pem') }}</span>). Trust this before other lab HTTPS.{% if not (ca.pem_ok | default(false)) %} <span class="badge off">pem missing</span>{% endif %}</p>
+      </div>
+      <div class="action-row">
+        <a class="btn" href="{{ ca.debian_sh | default('/ca/install-root-ca-debian.sh') }}">{{ ico('script') }} Debian/Ubuntu</a>
+        <p class="desc">Install script for Debian/Ubuntu: curl the PEM with <span class="mono">-k</span>, then <span class="mono">update-ca-certificates</span>. Path <span class="mono">{{ ca.debian_sh | default('/ca/install-root-ca-debian.sh') }}</span>.</p>
+      </div>
+      <div class="action-row">
+        <a class="btn" href="{{ ca.rhel_sh | default('/ca/install-root-ca-rhel.sh') }}">{{ ico('script') }} RHEL/OL</a>
+        <p class="desc">Install script for RHEL/Oracle Linux: same PEM, then <span class="mono">update-ca-trust extract</span>. Path <span class="mono">{{ ca.rhel_sh | default('/ca/install-root-ca-rhel.sh') }}</span>.</p>
+      </div>
+      <div class="action-row">
+        <a class="btn" href="{{ infra_stats_path }}.json">{{ ico('json') }} JSON</a>
+        <p class="desc">Machine-readable snapshot of this page (<span class="mono">{{ infra_stats_path }}.json</span>) for scripts and scrape diffs.</p>
+      </div>
+      </div>
 {% if ca.step_url | default('') %}
-        <li>step-ca: <a href="{{ ca.step_url }}" class="mono">{{ ca.step_url }}</a></li>
+      <p class="note">step-ca: <a href="{{ ca.step_url }}" class="mono">{{ ca.step_url }}</a></p>
 {% endif %}
 {% for u in ca.upstream_urls | default([]) %}
 {% if u and u != (ca.step_url | default('')) %}
-        <li>also: <a href="{{ u }}" class="mono">{{ u }}</a></li>
+      <p class="note">also: <a href="{{ u }}" class="mono">{{ u }}</a></p>
 {% endif %}
 {% endfor %}
-      </ul>
     </section>
+    </div>
 
+    <div data-panel="endpoints">
     <section>
       <h2>Nginx locations</h2>
       <p class="note">Known stacks from inventory / templates (not a live <span class="mono">nginx -T</span> dump).</p>
@@ -147,7 +290,7 @@
               <ul class="compact">
 {% for name in row.server_names | default([]) %}
 {% if name %}
-                <li class="mono">{{ name }}</li>
+                <li>{{ host_link(name) }}</li>
 {% endif %}
 {% endfor %}
               </ul>
@@ -166,7 +309,15 @@
         </tbody>
       </table>
     </section>
+    </div>
 
+    <div data-panel="mirrors">
+    <nav class="tabs sub" role="tablist" data-subtabs="mirrors" aria-label="Mirrors">
+      <button type="button" role="tab" data-subtab="apt" aria-selected="true">APT / YUM</button>
+      <button type="button" role="tab" data-subtab="helm" aria-selected="false">Helm repos</button>
+      <button type="button" role="tab" data-subtab="docker" aria-selected="false">Docker / registry</button>
+    </nav>
+    <div data-subpanel="apt" class="is-on">
     <section>
       <h2>APT / YUM repos</h2>
       <p class="note">From <span class="mono">pkg_repo_upstreams</span> + <span class="mono">enable_repo_*</span>.</p>
@@ -186,7 +337,7 @@
 {% endif %}
             </td>
             <td class="mono">{{ row.slug }}</td>
-            <td class="mono">{{ row.proxy_hostname }}</td>
+            <td>{% if row.proxy_hostname %}{{ host_link(row.proxy_hostname) }}{% endif %}</td>
             <td class="mono">{{ row.upstream_url }}</td>
           </tr>
 {% endfor %}
@@ -196,7 +347,9 @@
       <p class="note">Pkg-repo mirror disabled or no upstreams.</p>
 {% endif %}
     </section>
+    </div>
 
+    <div data-subpanel="helm">
     <section>
       <h2>Helm repos</h2>
       <p class="note">From <span class="mono">helm_repo_upstreams</span> → <span class="mono">*.helm.{{ dns_domain_suffix | default('') }}</span>.</p>
@@ -209,7 +362,7 @@
 {% for row in infra_stats_helm_repos %}
           <tr>
             <td class="mono">{{ row.name }}</td>
-            <td class="mono">{{ row.proxy_hostname }}</td>
+            <td>{% if row.proxy_hostname %}{{ host_link(row.proxy_hostname) }}{% endif %}</td>
             <td class="mono">{{ row.upstream_url }}</td>
           </tr>
 {% endfor %}
@@ -219,11 +372,12 @@
       <p class="note">Helm-repo mirror disabled or no upstreams.</p>
 {% endif %}
     </section>
+    </div>
 
+    <div data-subpanel="docker">
     <section>
       <h2>Docker / registry mirrors</h2>
       <p class="note">From <span class="mono">containerd_registry_mirrors</span> / registry nginx server names.</p>
-{% set hub = infra_stats_docker_hub | default({}) %}
 {% if hub.remaining is number %}
       <p>
 {% if hub.ok | default(false) %}
@@ -256,7 +410,7 @@
 {% for row in infra_stats_docker_repos %}
           <tr>
             <td class="mono">{{ row.dir_name }}</td>
-            <td class="mono">{{ row.proxy_hostname }}</td>
+            <td>{% if row.proxy_hostname %}{{ host_link(row.proxy_hostname) }}{% endif %}</td>
             <td class="mono">{{ row.server }}</td>
             <td>{% if row.direct | default(false) | bool %}direct{% else %}proxy{% endif %}</td>
           </tr>
@@ -267,7 +421,17 @@
       <p class="note">Registry nginx disabled or no mirrors.</p>
 {% endif %}
     </section>
+    </div>
+    </div>
 
+    <div data-panel="cache">
+    <nav class="tabs sub" role="tablist" data-subtabs="cache" aria-label="Cache">
+      <button type="button" role="tab" data-subtab="overview" aria-selected="true">Overview</button>
+{% for tree in infra_stats_cache | default([]) %}
+      <button type="button" role="tab" data-subtab="{{ tree.id | e }}" aria-selected="false">{{ cache_label(tree.id) }}</button>
+{% endfor %}
+    </nav>
+    <div data-subpanel="overview" class="is-on">
     <section>
       <h2>Infra cache</h2>
 {% if not (infra_stats_cache_scrape_ok | default(true) | bool) %}
@@ -307,11 +471,19 @@
 {% endfor %}
         </tbody>
       </table>
-{% for tree in infra_stats_cache %}
-      <h2 style="font-size:0.95rem;margin-top:0.85rem;">{{ tree.id | e }}{% if tree.html_truncated | default(false) | bool %} <span class="badge off">truncated</span>{% endif %}</h2>
+{% else %}
+      <p class="note">No cache trees enabled (pkg/helm/registry/custom-www gates off).</p>
+{% endif %}
+    </section>
+    </div>
+{% for tree in infra_stats_cache | default([]) %}
+    <div data-subpanel="{{ tree.id | e }}">
+    <section>
+      <h2>{{ cache_label(tree.id) }}{% if tree.html_truncated | default(false) | bool %} <span class="badge off">truncated</span>{% endif %}</h2>
 {% if tree.html_truncated | default(false) | bool or tree.truncated | default(false) | bool %}
       <p class="note">Showing {{ (tree.html_objects | default([])) | length }} of {{ tree.object_count | default(0) }} objects; see <span class="mono">{{ infra_stats_path }}.json</span>.</p>
 {% endif %}
+      <p class="note"><span class="mono">{{ tree.path | e }}</span> · {{ tree.size_human | default('0 B') | e }} · {{ tree.files | default(0) }} files</p>
 {% if (tree.upstreams | default([])) | length > 0 %}
       <table>
         <thead>
@@ -346,12 +518,12 @@
 {% endfor %}
         </tbody>
       </table>
-{% endfor %}
-{% else %}
-      <p class="note">No cache trees enabled (pkg/helm/registry/custom-www gates off).</p>
-{% endif %}
     </section>
+    </div>
+{% endfor %}
+    </div>
 
+    <div data-panel="dns">
     <section>
       <h2>BIND records</h2>
 {% if not (infra_stats_bind_scrape_ok | default(true) | bool) %}
@@ -402,7 +574,9 @@
       </table>
 {% endif %}
     </section>
+    </div>
 
+    <div data-panel="time">
     <section>
       <h2>NTP</h2>
 {% if not (setup_ntp | default(false) | bool) %}
@@ -463,7 +637,9 @@
       <p class="note">No NTP scrape rows.</p>
 {% endif %}
     </section>
+    </div>
 
+    <div data-panel="tls">
     <section>
       <h2>Certificates (known infra leaves + CA chain)</h2>
       <p class="note">On-disk paths for enabled TLS stacks only. Missing means the file is not on disk yet. Published via <span class="mono">{{ generated_by }}</span>.{% if not (infra_stats_known_scrape_ok | default(true) | bool) %}{% if infra_stats_known_scrape_stale | default(false) | bool %} <span class="badge off">stale</span> known-certs scrape soft-failed; previous snapshot kept.{% else %} <span class="badge off">scrape failed</span> known-certs scrape soft-failed; empty result.{% endif %}{% endif %}</p>
@@ -549,7 +725,77 @@
         </tbody>
       </table>
     </section>
+    </div>
 
   </main>
+  <script>
+    (function () {
+      var tabs = Array.prototype.slice.call(document.querySelectorAll('[data-tabs="main"] [data-tab]'));
+      var panels = Array.prototype.slice.call(document.querySelectorAll("[data-panel]"));
+      var ids = tabs.map(function (t) { return t.getAttribute("data-tab"); });
+      var subs = {};
+      function bindSub(parentId) {
+        var root = document.querySelector('[data-panel="' + parentId + '"]');
+        if (!root) return null;
+        var stabs = Array.prototype.slice.call(root.querySelectorAll("[data-subtab]"));
+        var spans = Array.prototype.slice.call(root.querySelectorAll("[data-subpanel]"));
+        var sids = stabs.map(function (t) { return t.getAttribute("data-subtab"); });
+        function showSub(id, skipHash) {
+          if (sids.indexOf(id) === -1) id = sids[0] || "";
+          stabs.forEach(function (t) {
+            t.setAttribute("aria-selected", t.getAttribute("data-subtab") === id ? "true" : "false");
+          });
+          spans.forEach(function (p) {
+            p.classList.toggle("is-on", p.getAttribute("data-subpanel") === id);
+          });
+          try { localStorage.setItem("infra-stats-sub-" + parentId, id); } catch (e) {}
+          if (!skipHash && id) {
+            try { history.replaceState(null, "", "#" + parentId + "/" + id); } catch (e) {}
+          }
+          return id;
+        }
+        stabs.forEach(function (t) {
+          t.addEventListener("click", function () { showSub(t.getAttribute("data-subtab")); });
+        });
+        return { show: showSub, ids: sids };
+      }
+      ["mirrors", "cache"].forEach(function (id) { subs[id] = bindSub(id); });
+      function currentSub(id, preferred) {
+        var group = subs[id];
+        if (!group) return "";
+        if (preferred && group.ids.indexOf(preferred) !== -1) return preferred;
+        var stored = "";
+        try { stored = localStorage.getItem("infra-stats-sub-" + id) || ""; } catch (e) {}
+        if (stored && group.ids.indexOf(stored) !== -1) return stored;
+        return group.ids[0] || "";
+      }
+      function show(id, sub) {
+        if (ids.indexOf(id) === -1) id = "trust";
+        tabs.forEach(function (t) {
+          t.setAttribute("aria-selected", t.getAttribute("data-tab") === id ? "true" : "false");
+        });
+        panels.forEach(function (p) {
+          p.classList.toggle("is-on", p.getAttribute("data-panel") === id);
+        });
+        try { localStorage.setItem("infra-stats-tab", id); } catch (e) {}
+        var group = subs[id];
+        if (group) {
+          var picked = currentSub(id, sub);
+          group.show(picked, true);
+          try { history.replaceState(null, "", "#" + id + (picked ? "/" + picked : "")); } catch (e) {}
+        } else {
+          try { history.replaceState(null, "", "#" + id); } catch (e) {}
+        }
+      }
+      tabs.forEach(function (t) {
+        t.addEventListener("click", function () { show(t.getAttribute("data-tab")); });
+      });
+      var fromHash = (location.hash || "").replace(/^#/, "");
+      var parts = fromHash.split("/");
+      var fromStore = "";
+      try { fromStore = localStorage.getItem("infra-stats-tab") || ""; } catch (e) {}
+      show(parts[0] || fromStore || "trust", parts[1] || "");
+    })();
+  </script>
 </body>
 </html>

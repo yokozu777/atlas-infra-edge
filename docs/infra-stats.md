@@ -26,8 +26,19 @@ Leaf `dev/infra` sets this. Requires `setup_registry_nginx` and `setup_stepca` (
 Auth: none (lab HTTPS / CA trust only). First CA download needs `curl -k` until the
 root is in the client store.
 
-The HTML **Trust / CA** block links those files. Install scripts `curl -k` the PEM
+The HTML page uses operator tabs (Trust, Endpoints, Mirrors, Cache, DNS, Time,
+TLS) on a black background. Hash `#trust` … `#tls` is sticky; nested hashes
+like `#mirrors/apt` and `#cache/overview` remember the inner tab.
+
+**Mirrors** has inner tabs: APT / YUM, Helm repos, Docker / registry.
+**Cache** has Overview plus one inner tab per on-disk tree (APT/YUM metadata
+and blobs, Helm repos/releases, Docker/registry, custom www).
+
+Root CA PEM, Debian/Ubuntu, RHEL/OL, and JSON live on the **Trust / CA** tab:
+one button per row with a short description. Install scripts `curl -k` the PEM
 from `/ca/roots.pem`, then `update-ca-certificates` or `update-ca-trust extract`.
+Nginx `server_names` and proxy hosts are `https://` links (wildcard names stay
+plain text).
 
 **Docker Hub pulls left** (anonymous `HEAD` of `ratelimitpreview/test`) is the Hub
 quota for this host's WAN IP — the same pool pull-through uses. Docker documents

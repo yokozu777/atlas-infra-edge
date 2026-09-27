@@ -948,6 +948,7 @@ nginx_cache_sync_fresh_max_age_hours: 24
 # and copies selected trees onto /opt before compose_start_registry.
 # Seed registry must be EXTERNAL (reachable after core, before local Harbor).
 # Robot creds → atlas-infra-edge.secrets.yml (never in this catalog).
+# Load user/password may both be empty (anonymous pull, e.g. public Docker Hub).
 # Tags must be immutable (not latest). TLS certs/ are never packed.
 # Load skip compares pulled RepoDigest + non-empty dest trees (not tag).
 # Publish is opt-in (--tags 14_infra_cache_seed_publish), not a default play slot.

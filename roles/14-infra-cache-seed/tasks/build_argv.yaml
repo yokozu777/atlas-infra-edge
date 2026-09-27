@@ -7,7 +7,7 @@
       - -f
       - "{{ infra_cache_seed_work_dir }}/Dockerfile"
       - -t
-      - "{{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}"
+      - "{{ infra_cache_seed_ref }}"
 
 - name: Append BuildKit additional contexts for enabled seed components
   ansible.builtin.set_fact:

@@ -60,7 +60,7 @@
       - -f
       - "{{ infra_cache_seed_work_dir }}/Dockerfile"
       - -t
-      - "{{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}"
+      - "{{ infra_cache_seed_ref }}"
       - "{{ infra_cache_seed_work_dir }}"
   environment:
     DOCKER_BUILDKIT: "0"

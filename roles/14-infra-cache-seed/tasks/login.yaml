@@ -1,4 +1,14 @@
 ---
+# Empty user+password: skip login (anonymous pull, e.g. public Docker Hub).
+- name: Decide infra cache seed registry login
+  ansible.builtin.set_fact:
+    infra_cache_seed_registry_logged_in: >-
+      {{
+        (infra_cache_seed_registry_user | default('') | trim | length > 0)
+        and (infra_cache_seed_registry_password | default('') | trim | length > 0)
+      }}
+  no_log: true
+
 - name: Log in to infra cache seed registry
   ansible.builtin.command:
     argv:
@@ -11,3 +21,4 @@
     stdin: "{{ infra_cache_seed_registry_password }}"
   no_log: true
   changed_when: false
+  when: infra_cache_seed_registry_logged_in | default(false) | bool

@@ -8,3 +8,4 @@
   register: infra_cache_seed_logout
   changed_when: false
   failed_when: false
+  when: infra_cache_seed_registry_logged_in | default(false) | bool

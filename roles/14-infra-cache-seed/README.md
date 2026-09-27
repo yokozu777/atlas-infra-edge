@@ -14,6 +14,8 @@ the host (`/opt/...`); the seed image is a one-shot `docker run --rm` copy.
 | load | `infra_cache_seed_load_enabled` | after `compose_start_core`, before `compose_start_registry` | `docker pull` + extract |
 
 Credentials live in `atlas-infra-edge.secrets.yml` (two robot accounts).
+Load user/password may both be empty for an anonymous pull (public Docker Hub);
+private registries still need a robot. Publish still requires push creds.
 Tags must be immutable (not `latest`).
 
 **XOR:** `infra_cache_seed_load_enabled` and `nginx_cache_sync_enabled` cannot both

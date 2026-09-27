@@ -9,6 +9,15 @@
     infra_cache_seed_tag: "{{ infra_cache_seed_publish_tag }}"
     infra_cache_seed_publish_use_staging: false
 
+- name: Compose infra cache seed publish reference
+  ansible.builtin.set_fact:
+    infra_cache_seed_ref: >-
+      {{
+        infra_cache_seed_image
+        if (':' in (infra_cache_seed_image.split('/') | last))
+        else (infra_cache_seed_image ~ ':' ~ infra_cache_seed_tag)
+      }}
+
 - name: Select infra cache seed publish registry credentials
   ansible.builtin.set_fact:
     infra_cache_seed_registry_user: "{{ infra_cache_seed_publish_registry_user }}"
@@ -100,7 +109,7 @@
         argv:
           - docker
           - push
-          - "{{ infra_cache_seed_image }}:{{ infra_cache_seed_tag }}"
+          - "{{ infra_cache_seed_ref }}"
       async: "{{ infra_cache_seed_publish_timeout_sec | int }}"
       poll: "{{ infra_cache_seed_async_poll_sec | int }}"
   always:

@@ -46,6 +46,7 @@ infra_cache_seed_publish_use_staging: false
 infra_cache_seed_async_poll_sec: 10
 
 # Filled from atlas-infra-edge.secrets.yml when a layer is enabled.
+# Load user+password may both be empty (anonymous pull). Publish still needs push creds.
 infra_cache_seed_publish_registry_user: ""
 infra_cache_seed_publish_registry_password: ""
 infra_cache_seed_load_registry_user: ""

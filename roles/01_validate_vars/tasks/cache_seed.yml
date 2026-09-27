@@ -92,14 +92,21 @@
 - name: Assert infra cache seed load robot creds when load is enabled
   ansible.builtin.assert:
     that:
-      - infra_cache_seed_load_registry_user | default('') | trim | length > 0
-      - infra_cache_seed_load_registry_user | trim | upper != 'CHANGEME'
-      - infra_cache_seed_load_registry_password | default('') | trim | length > 0
-      - infra_cache_seed_load_registry_password | trim | upper != 'CHANGEME'
+      - >-
+        (
+          (infra_cache_seed_load_registry_user | default('') | trim | length == 0)
+          and (infra_cache_seed_load_registry_password | default('') | trim | length == 0)
+        )
+        or (
+          (infra_cache_seed_load_registry_user | default('') | trim | length > 0)
+          and (infra_cache_seed_load_registry_user | trim | upper != 'CHANGEME')
+          and (infra_cache_seed_load_registry_password | default('') | trim | length > 0)
+          and (infra_cache_seed_load_registry_password | trim | upper != 'CHANGEME')
+        )
     fail_msg: >-
-      infra_cache_seed_load_enabled=true requires real
-      infra_cache_seed_load_registry_user/password
-      (replace CHANGEME via EXTRA_VARS_FILE / vault)
+      infra_cache_seed_load_registry_user/password must both be empty
+      (anonymous pull, e.g. public Docker Hub) or both real values
+      (not CHANGEME). Private registries still need a robot.
   when: infra_cache_seed_load_enabled | default(false) | bool
   no_log: true
 
