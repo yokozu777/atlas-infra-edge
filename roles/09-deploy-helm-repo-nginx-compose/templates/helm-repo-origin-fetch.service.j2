@@ -1,0 +1,13 @@
+[Unit]
+Description=Helm origin fetch (primary, then backup)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 {{ helm_repo_nginx_config_dir }}/fetch-helm-origin.py --config {{ helm_repo_nginx_config_dir }}/fetch-helm-origin.json --bind {{ helm_repo_origin_fetch_bind }} --port {{ helm_repo_origin_fetch_port }}
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -9,6 +9,10 @@ setup_helm_repo_nginx: false
 # Loopback raw-index cache (public /index.yaml only rewrites). Catalog may override.
 helm_repo_nginx_cache_valid_index: 24h
 helm_repo_nginx_index_origin_port: 18080
+# Host fetcher. nginx in the registry container calls inventory_hostname:port.
+# A stalled primary body never becomes an HTTP 200.
+helm_repo_origin_fetch_bind: 0.0.0.0
+helm_repo_origin_fetch_port: 18081
 
 # Warm chart .tgz archives into helm-repo nginx proxy_cache (infra only; see helm_repo_cache_warm_specs).
 helm_repo_nginx_cache_warm_enabled: true

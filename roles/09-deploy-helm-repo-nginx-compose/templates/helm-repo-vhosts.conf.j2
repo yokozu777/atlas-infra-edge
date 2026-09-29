@@ -12,6 +12,29 @@ server {
 
 {% for proxy in helm_repo_proxy_upstreams %}
     location = /raw/{{ proxy.proxy_hostname }}/index.yaml {
+{% if proxy.proxy_origin_backup | default('') | length > 0 %}
+        # Fetcher tries the primary, then the backup, and answers only with a full body.
+        proxy_pass http://{{ inventory_hostname }}:{{ helm_repo_origin_fetch_port }}/raw/{{ proxy.proxy_hostname }}/index.yaml;
+        proxy_set_header Host {{ inventory_hostname }};
+        proxy_set_header Accept-Encoding "";
+
+        proxy_buffer_size 512k;
+        proxy_buffers 8 512k;
+        proxy_busy_buffers_size 1024k;
+
+        proxy_cache helm_repo_cache;
+        proxy_cache_key "helm-index:{{ proxy.proxy_hostname }}";
+        proxy_cache_valid 200 {{ helm_repo_nginx_cache_valid_index }};
+        proxy_cache_valid 404 {{ helm_repo_nginx_cache_valid_not_found }};
+        proxy_ignore_headers Cache-Control Expires Set-Cookie;
+        proxy_cache_lock on;
+        add_header X-Cache-Status $upstream_cache_status;
+
+        proxy_buffering on;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 90s;
+        proxy_send_timeout 90s;
+{% else %}
         proxy_pass {{ proxy.proxy_origin }}{{ proxy.proxy_path_prefix }}/index.yaml;
         proxy_set_header Host {{ proxy.upstream_host }};
         proxy_set_header Accept-Encoding "";
@@ -39,6 +62,7 @@ server {
         proxy_connect_timeout 10s;
         proxy_read_timeout 30s;
         proxy_send_timeout 30s;
+{% endif %}
     }
 {% endfor %}
 }
@@ -170,15 +194,25 @@ server {
         proxy_busy_buffers_size 1024k;
 
         proxy_buffering on;
+{% if proxy.proxy_origin_backup | default('') | length > 0 %}
+        # Loopback tries the primary for 30s, then the backup for 30s.
+        proxy_read_timeout 90s;
+        proxy_send_timeout 90s;
+{% else %}
         # Inner origin fetch is 30s; keep a small margin so loopback MISS is not cut.
         proxy_read_timeout 35s;
         proxy_send_timeout 35s;
+{% endif %}
 
         gzip off;
         sub_filter_once off;
         sub_filter_types application/octet-stream text/plain text/yaml application/x-yaml application/yaml;
         sub_filter '{{ proxy.proxy_public_base }}' 'https://{{ proxy.proxy_hostname }}/';
         sub_filter 'http://{{ proxy.upstream_host }}{{ proxy.proxy_path_prefix }}/' 'https://{{ proxy.proxy_hostname }}/';
+{% if proxy.proxy_public_base_backup | default('') | length > 0 %}
+        sub_filter '{{ proxy.proxy_public_base_backup }}' 'https://{{ proxy.proxy_hostname }}/';
+        sub_filter 'http://{{ proxy.upstream_host_backup }}{{ proxy.proxy_path_prefix_backup }}/' 'https://{{ proxy.proxy_hostname }}/';
+{% endif %}
 {% for chart_host in proxy.chart_hosts %}
         sub_filter 'https://{{ chart_host }}/' 'https://{{ proxy.proxy_hostname }}/@chart/{{ chart_host }}/';
         sub_filter 'http://{{ chart_host }}/' 'https://{{ proxy.proxy_hostname }}/@chart/{{ chart_host }}/';
@@ -186,6 +220,27 @@ server {
     }
 
     location / {
+{% if proxy.proxy_origin_backup | default('') | length > 0 %}
+        proxy_pass http://{{ inventory_hostname }}:{{ helm_repo_origin_fetch_port }}/chart/{{ proxy.proxy_hostname }}/;
+        proxy_set_header Host {{ inventory_hostname }};
+
+        proxy_buffer_size 512k;
+        proxy_buffers 8 512k;
+        proxy_busy_buffers_size 1024k;
+
+        proxy_cache helm_repo_cache;
+        proxy_cache_key "$host$uri$is_args$args";
+        proxy_cache_valid 200 206 302 {{ helm_repo_nginx_cache_valid_charts }};
+        proxy_cache_valid 404 {{ helm_repo_nginx_cache_valid_not_found }};
+        proxy_ignore_headers Cache-Control Expires Set-Cookie;
+        proxy_hide_header Set-Cookie;
+        proxy_cache_lock on;
+        add_header X-Cache-Status $upstream_cache_status;
+
+        proxy_buffering on;
+        proxy_read_timeout 900s;
+        proxy_send_timeout 900s;
+{% else %}
         proxy_pass {{ proxy.proxy_origin }}{{ proxy.proxy_path_prefix }}/;
         proxy_set_header Host {{ proxy.upstream_host }};
         proxy_set_header X-Real-IP $remote_addr;
@@ -209,6 +264,7 @@ server {
         proxy_buffering on;
         proxy_read_timeout 900s;
         proxy_send_timeout 900s;
+{% endif %}
     }
 }
 {% endfor %}

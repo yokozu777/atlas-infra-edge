@@ -31,6 +31,8 @@
 - ansible.builtin.include_tasks: registry_ca.yaml
   when: infra_cache_seed_registry_tls_ca_enabled | default(false) | bool
 
+- ansible.builtin.include_tasks: registry_insecure.yaml
+
 - ansible.builtin.include_tasks: load_services_hold.yaml
   when: infra_cache_seed_stop_services | default(true) | bool
 

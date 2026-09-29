@@ -1,0 +1,74 @@
+---
+# docker pull / login / imagetools verify registry TLS inside dockerd.
+# Always treat the seed registry as insecure so an unknown issuer does not
+# fail the load. Restart dockerd only when daemon.json actually changes.
+
+- name: Ensure Docker config directory exists for seed registry TLS skip
+  ansible.builtin.file:
+    path: /etc/docker
+    state: directory
+    mode: "0755"
+
+- name: Read Docker daemon.json before seed registry TLS skip
+  ansible.builtin.slurp:
+    src: /etc/docker/daemon.json
+  register: infra_cache_seed_daemon_json
+  failed_when: false
+  changed_when: false
+
+- name: Parse Docker daemon.json before seed registry TLS skip
+  ansible.builtin.set_fact:
+    infra_cache_seed_registry_host_trim: "{{ infra_cache_seed_registry_host | default('') | trim }}"
+    infra_cache_seed_daemon_existing: >-
+      {{
+        (
+          infra_cache_seed_daemon_json.content | b64decode | trim
+          if (
+            (infra_cache_seed_daemon_json.content | default('') | length) > 0
+          )
+          else '{}'
+        ) | from_json
+      }}
+
+- name: Mark seed registry as an insecure Docker registry
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    mode: "0644"
+    content: "{{ infra_cache_seed_daemon_merged | to_nice_json }}\n"
+  vars:
+    infra_cache_seed_insecure_hosts: >-
+      {{
+        (
+          (infra_cache_seed_daemon_existing['insecure-registries'] | default([]))
+          + [infra_cache_seed_registry_host_trim]
+        ) | unique
+      }}
+    infra_cache_seed_daemon_merged: >-
+      {{
+        infra_cache_seed_daemon_existing
+        | combine({'insecure-registries': infra_cache_seed_insecure_hosts})
+      }}
+  when:
+    - infra_cache_seed_registry_host_trim | length > 0
+    - >-
+      infra_cache_seed_registry_host_trim
+      not in (infra_cache_seed_daemon_existing['insecure-registries'] | default([]))
+  register: infra_cache_seed_daemon_written
+
+- name: Restart Docker after seed registry TLS skip
+  ansible.builtin.systemd:
+    name: docker
+    state: restarted
+  when: infra_cache_seed_daemon_written is changed
+
+- name: Wait until Docker answers after seed registry TLS skip
+  ansible.builtin.command:
+    argv:
+      - docker
+      - info
+  changed_when: false
+  register: infra_cache_seed_docker_info
+  retries: 12
+  delay: 2
+  until: (infra_cache_seed_docker_info.rc | default(1) | int) == 0
+  when: infra_cache_seed_daemon_written is changed

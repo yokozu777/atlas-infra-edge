@@ -1,0 +1,11 @@
+{
+{% set ns = namespace(first=true) %}
+{% for proxy in helm_repo_proxy_upstreams if proxy.proxy_origin_backup | default('') | length > 0 %}
+{% if not ns.first %},{% endif %}
+{% set ns.first = false %}
+  "{{ proxy.proxy_hostname }}": {
+    "primary": "{{ proxy.proxy_origin }}{{ proxy.proxy_path_prefix }}",
+    "backup": "{{ proxy.proxy_origin_backup }}{{ proxy.proxy_path_prefix_backup }}"
+  }
+{% endfor %}
+}

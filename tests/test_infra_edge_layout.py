@@ -558,6 +558,9 @@ class InfraEdgeLayoutTest(unittest.TestCase):
         self.assertIn("pkg_repo_upstreams:", catalog)
         self.assertIn("slug: debian-main", catalog)
         self.assertIn("helm_repo_upstreams:", catalog)
+        self.assertIn('name: openbao', catalog)
+        self.assertIn("https://openbao.github.io/openbao-helm", catalog)
+        self.assertIn("upstream_host: openbao.github.io", catalog)
         self.assertIn("thanos-community", catalog)
         self.assertIn("thanos-community.github.io/helm-charts", catalog)
         self.assertIn("kyverno", catalog)
@@ -864,6 +867,79 @@ class InfraEdgeLayoutTest(unittest.TestCase):
         self.assertIn("proxy_ssl_name {{ proxy.upstream_host }};", inner)
         self.assertNotIn("sub_filter", inner)
         self.assertNotIn("proxy_no_cache 1;", inner)
+
+    def test_helm_repo_upstream_backup_failover(self) -> None:
+        """Rook and Calico keep the official origin and fail over to Yandex."""
+        catalog = (REPO_ROOT / "group_vars" / "all" / "atlas-infra-edge.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertRegex(
+            catalog,
+            r"name: projectcalico\n"
+            r"(?:.*\n){0,8}"
+            r"\s+upstream_url: \"https://docs\.tigera\.io/calico/charts\"\n"
+            r"\s+upstream_host: docs\.tigera\.io\n"
+            r"\s+upstream_url_backup: \"https://mirror\.yandex\.ru/helm/docs\.tigera\.io\"\n"
+            r"\s+upstream_host_backup: mirror\.yandex\.ru\n",
+        )
+        self.assertRegex(
+            catalog,
+            r"name: rook-release\n"
+            r"(?:.*\n){0,6}"
+            r"\s+upstream_url: \"https://charts\.rook\.io/release\"\n"
+            r"\s+upstream_host: charts\.rook\.io\n"
+            r"\s+upstream_url_backup: \"https://mirror\.yandex\.ru/helm/charts\.rook\.io\"\n"
+            r"\s+upstream_host_backup: mirror\.yandex\.ru\n",
+        )
+        render = (
+            REPO_ROOT
+            / "roles"
+            / "09-deploy-helm-repo-nginx-compose"
+            / "tasks"
+            / "render.yaml"
+        ).read_text(encoding="utf-8")
+        for key in (
+            "proxy_origin_backup",
+            "proxy_path_prefix_backup",
+            "upstream_host_backup",
+            "proxy_public_base_backup",
+        ):
+            self.assertIn(f"'{key}':", render)
+        helm_vhosts = (
+            REPO_ROOT
+            / "roles"
+            / "09-deploy-helm-repo-nginx-compose"
+            / "templates"
+            / "helm-repo-vhosts.conf.j2"
+        ).read_text(encoding="utf-8")
+        guard = "{% if proxy.proxy_origin_backup | default('') | length > 0 %}"
+        guarded = (
+            "proxy_pass http://{{ inventory_hostname }}:{{ helm_repo_origin_fetch_port }}/raw/{{ proxy.proxy_hostname }}/index.yaml;",
+            "proxy_pass http://{{ inventory_hostname }}:{{ helm_repo_origin_fetch_port }}/chart/{{ proxy.proxy_hostname }}/;",
+        )
+        fetch_script = (
+            REPO_ROOT
+            / "roles"
+            / "09-deploy-helm-repo-nginx-compose"
+            / "files"
+            / "fetch_helm_origin.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("def choose_body(", fetch_script)
+        self.assertIn("fetch-helm-origin.py", render)
+        base_guard = "{% if proxy.proxy_public_base_backup | default('') | length > 0 %}"
+        for marker, opener in (
+            *((item, guard) for item in guarded),
+            ("sub_filter '{{ proxy.proxy_public_base_backup }}'", base_guard),
+        ):
+            pos = helm_vhosts.find(marker)
+            self.assertGreater(pos, -1, marker)
+            opened = helm_vhosts.rfind(opener, 0, pos)
+            closed = helm_vhosts.rfind("{% endif %}", 0, pos)
+            self.assertGreater(opened, closed, marker)
+        no_backup = helm_vhosts.split("{% else %}", 1)[1].split("{% endif %}", 1)[0]
+        self.assertIn('proxy_cache_key "helm-index:{{ proxy.proxy_hostname }}";', no_backup)
+        self.assertNotIn("error_page", no_backup)
+        self.assertNotIn("proxy_origin_backup", no_backup)
 
     def test_helm_repo_cache_warm_installs_pyyaml_by_os(self) -> None:
         """warm-helm-repo-cache.py needs PyYAML: python3-yaml on Debian, python3-pyyaml on RHEL."""
@@ -1608,6 +1684,11 @@ class InfraEdgeLayoutTest(unittest.TestCase):
         self.assertIn("docker", load)
         self.assertIn("registry_ca.yaml", load)
         self.assertLess(load.index("registry_ca.yaml"), load.index("login.yaml"))
+        self.assertIn("registry_insecure.yaml", load)
+        self.assertLess(load.index("registry_insecure.yaml"), load.index("login.yaml"))
+        insecure = (role / "tasks" / "registry_insecure.yaml").read_text(encoding="utf-8")
+        self.assertIn("insecure-registries", insecure)
+        self.assertIn("state: restarted", insecure)
         self.assertIn("registry_ca.yaml", publish)
         self.assertLess(publish.index("registry_ca.yaml"), publish.index("login.yaml"))
         login = (role / "tasks" / "login.yaml").read_text(encoding="utf-8")

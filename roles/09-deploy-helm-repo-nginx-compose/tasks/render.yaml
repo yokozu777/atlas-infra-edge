@@ -35,7 +35,11 @@
           'proxy_path_prefix': upstream.upstream_url | helm_repo_nginx_path_prefix,
           'proxy_public_base': (upstream.upstream_url | helm_repo_nginx_origin) ~ (upstream.upstream_url | helm_repo_nginx_path_prefix) ~ '/',
           'upstream_host': upstream.upstream_host,
-          'chart_hosts': upstream.upstream_host | helm_repo_chart_hosts(upstream.chart_hosts | default([]))
+          'chart_hosts': upstream.upstream_host | helm_repo_chart_hosts(upstream.chart_hosts | default([])),
+          'proxy_origin_backup': (upstream.upstream_url_backup | default('') | trim | length > 0) | ternary(upstream.upstream_url_backup | default('') | helm_repo_nginx_origin, ''),
+          'proxy_path_prefix_backup': (upstream.upstream_url_backup | default('') | trim | length > 0) | ternary(upstream.upstream_url_backup | default('') | helm_repo_nginx_path_prefix, ''),
+          'upstream_host_backup': upstream.upstream_host_backup | default('') | trim,
+          'proxy_public_base_backup': (upstream.upstream_url_backup | default('') | trim | length > 0) | ternary((upstream.upstream_url_backup | default('') | helm_repo_nginx_origin) ~ (upstream.upstream_url_backup | default('') | helm_repo_nginx_path_prefix) ~ '/', '')
         })]
       }}
   loop: "{{ helm_repo_upstreams }}"
@@ -131,6 +135,48 @@
   when:
     - helm_repo_tls_enabled | default(false) | bool
     - stepca_provisioned_for_helm_repo_tls.stat.exists | default(false)
+
+- name: Install helm origin fetch script
+  ansible.builtin.copy:
+    src: fetch_helm_origin.py
+    dest: "{{ helm_repo_nginx_config_dir }}/fetch-helm-origin.py"
+    mode: "0755"
+  register: helm_repo_origin_fetch_script
+
+- name: Install helm origin fetch map
+  ansible.builtin.template:
+    src: helm-repo-origin-fetch.json.j2
+    dest: "{{ helm_repo_nginx_config_dir }}/fetch-helm-origin.json"
+    mode: "0644"
+  register: helm_repo_origin_fetch_map
+
+- name: Install helm origin fetch systemd unit
+  ansible.builtin.template:
+    src: helm-repo-origin-fetch.service.j2
+    dest: /etc/systemd/system/helm-repo-origin-fetch.service
+    mode: "0644"
+  register: helm_repo_origin_fetch_unit
+
+- name: Reload systemd after helm origin fetch unit change
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: helm_repo_origin_fetch_unit.changed | default(false)
+
+- name: Enable and start helm origin fetch
+  ansible.builtin.systemd:
+    name: helm-repo-origin-fetch.service
+    enabled: true
+    state: restarted
+  when: >-
+    helm_repo_origin_fetch_script.changed | default(false)
+    or helm_repo_origin_fetch_map.changed | default(false)
+    or helm_repo_origin_fetch_unit.changed | default(false)
+
+- name: Ensure helm origin fetch is started
+  ansible.builtin.systemd:
+    name: helm-repo-origin-fetch.service
+    enabled: true
+    state: started
 
 - name: Deploy helm-repo nginx vhost configuration
   ansible.builtin.template:

@@ -625,6 +625,8 @@ helm_repo_upstreams:
     nexus_path: calico
     upstream_url: "https://docs.tigera.io/calico/charts"
     upstream_host: docs.tigera.io
+    upstream_url_backup: "https://mirror.yandex.ru/helm/docs.tigera.io"
+    upstream_host_backup: mirror.yandex.ru
     chart_hosts:
       - github.com
   - name: metallb
@@ -643,6 +645,8 @@ helm_repo_upstreams:
     nexus_path: rook-release
     upstream_url: "https://charts.rook.io/release"
     upstream_host: charts.rook.io
+    upstream_url_backup: "https://mirror.yandex.ru/helm/charts.rook.io"
+    upstream_host_backup: mirror.yandex.ru
   - name: fluent
     nexus_path: fluent
     upstream_url: "https://fluent.github.io/helm-charts"
@@ -655,6 +659,10 @@ helm_repo_upstreams:
     nexus_path: helm.releases.hashicorp.com/
     upstream_url: "https://helm.releases.hashicorp.com"
     upstream_host: helm.releases.hashicorp.com
+  - name: openbao
+    nexus_path: openbao-helm/
+    upstream_url: "https://openbao.github.io/openbao-helm"
+    upstream_host: openbao.github.io
   - name: istio
     nexus_path: istio/
     upstream_url: "https://istio-release.storage.googleapis.com/charts"
