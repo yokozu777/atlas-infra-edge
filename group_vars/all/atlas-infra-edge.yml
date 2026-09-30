@@ -317,9 +317,6 @@ containerd_registry_mirrors:
   - dir_name: getsentry
     server: "https://getsentry"
     mirror_path: docker-hub
-  - dir_name: kubevious
-    server: "https://kubevious"
-    mirror_path: docker-hub
   - dir_name: opensearchproject
     server: "https://opensearchproject"
     mirror_path: docker-hub
@@ -717,10 +714,6 @@ helm_repo_upstreams:
     nexus_path: chaos-mesh/
     upstream_url: "https://charts.chaos-mesh.org"
     upstream_host: charts.chaos-mesh.org
-  - name: kubevious
-    nexus_path: kubevious/
-    upstream_url: "https://helm.kubevious.io"
-    upstream_host: helm.kubevious.io
   - name: external-secrets
     nexus_path: external-secrets/
     upstream_url: "https://external-secrets.io"
